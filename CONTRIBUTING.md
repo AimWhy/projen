@@ -15,10 +15,14 @@ The following tools need to be installed to develop on projen locally.
 - [Node]
 - [Yarn]
 - [Maven]
+- [Go]
+- [git] >= 2.28
 
-[Node]: https://nodejs.org/en/download/
-[Yarn]: https://yarnpkg.com/en/docs/install
-[Maven]: https://maven.apache.org/install
+[node]: https://nodejs.org/en/download/
+[yarn]: https://yarnpkg.com/en/docs/install
+[maven]: https://maven.apache.org/install
+[go]: https://go.dev/doc/install
+[git]: https://git-scm.com/downloads
 
 ## Getting Started
 
@@ -30,6 +34,8 @@ $ cd projen
 $ yarn # install dependencies
 $ yarn build # build projen
 ```
+
+Attention Windows users: It has been noted that there are compatibility issues between Git Bash and the Projen build script when running on Windows. Therefore, we recommend directly utilizing the WSL (Windows Subsystem Linux) terminal to build the Projen project.
 
 ## Code Organization
 
@@ -99,7 +105,7 @@ $ yarn link projen
 $ pj
 ```
 
-From now on, running `pj` in this session will use the local development version of 
+From now on, running `pj` in this session will use the local development version of
 projen instead of the latest one from npm.
 
 ```console
@@ -109,26 +115,25 @@ $ yarn unlink projen
 ### Version bumping
 
 Currently projen bumps versions automatically thru a GitHub action when a commit
-pushed to master successfully builds. Projen follows [semantic versioning](https://semver.org/)
-through the [standard-version](https://github.com/conventional-changelog/standard-version)
+pushed to `main` successfully builds. Projen follows [semantic versioning](https://semver.org/)
+through the [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version)
 npm utility.
 
 ## Making a pull request
 
-* Commit title and message (and PR title and description) must adhere to [conventionalcommits](https://www.conventionalcommits.org).
-  * The title must begin with `feat(module): title`, `fix(module): title`,
-  `refactor(module): title` or `chore(module): title`, where the module refers
-  to the projects or components that the change centers on.
-  The module can be omitted, so "feat: title" is okay as well.
-  * Title should be lowercase.
-  * No period at the end of the title.
-* Commit message should describe _motivation_. Think about your code reviewers and what information they need in
+- Commit title and message (and PR title and description) must adhere to [conventionalcommits](https://www.conventionalcommits.org).
+  - The title must begin with `feat(module): title`, `fix(module): title` or `chore(module): title`, where the module refers
+    to the projects or components that the change centers on.
+    The module can be omitted, so "feat: title" is okay as well.
+  - Title should be lowercase.
+  - No period at the end of the title.
+- Commit message should describe _motivation_. Think about your code reviewers and what information they need in
   order to understand what you did. If it's a big commit (hopefully not), try to provide some good entry points so
   it will be easier to follow.
-* Commit message should indicate which issues are fixed: `fixes #<issue>` or `closes #<issue>`.
-* Shout out to collaborators.
-* If not obvious (i.e. from unit tests), describe how you verified that your change works.
-* If this commit includes breaking changes, they must be listed at the end in the following format (notice how multiple breaking changes should be formatted):
+- Commit message should indicate which issues are fixed: `fixes #<issue>` or `closes #<issue>`.
+- Shout out to collaborators.
+- If not obvious (i.e. from unit tests), describe how you verified that your change works.
+- If this commit includes breaking changes, they must be listed at the end in the following format (notice how multiple breaking changes should be formatted):
 
 ```
 BREAKING CHANGE: Description of what broke and how to achieve this behavior now

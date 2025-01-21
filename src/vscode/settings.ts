@@ -1,6 +1,6 @@
+import { VsCode } from "./vscode";
 import { Component } from "../component";
 import { JsonFile } from "../json";
-import { VsCode } from "./vscode";
 
 /**
  * VS Code Workspace settings
@@ -8,13 +8,14 @@ import { VsCode } from "./vscode";
  */
 export class VsCodeSettings extends Component {
   private readonly content: any;
+  public readonly file: JsonFile;
 
   constructor(vscode: VsCode) {
     super(vscode.project);
 
     this.content = {};
 
-    new JsonFile(vscode.project, ".vscode/settings.json", {
+    this.file = new JsonFile(vscode.project, ".vscode/settings.json", {
       omitEmpty: false,
       obj: this.content,
     });

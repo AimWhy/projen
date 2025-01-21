@@ -1,7 +1,7 @@
+import * as fs from "fs";
 import * as path from "path";
 import { unzipSync } from "zlib";
 import { snake } from "case";
-import * as fs from "fs-extra";
 
 const PROJEN_MODULE_ROOT = path.join(__dirname, "..");
 const PROJECT_BASE_FQN = "projen.Project";
@@ -22,6 +22,10 @@ export interface ProjectOption {
   parent: string;
   docs?: string;
   default?: string;
+  /**
+   * The value that will be used at initial project creation
+   */
+  initialValue?: string;
   optional?: boolean;
   deprecated?: boolean;
   featured?: boolean;
@@ -68,6 +72,7 @@ interface JsiiType {
     deprecated?: string;
     custom?: {
       pjid?: string;
+      pjnew?: string;
     };
   };
 }
@@ -88,7 +93,7 @@ export interface JsiiPropertyType {
  *
  * @param moduleDirs A list of npm module directories
  */
-export function discover(...moduleDirs: string[]) {
+export function discover(...moduleDirs: string[]): ProjectType[] {
   const jsii = discoverJsiiTypes(...moduleDirs);
 
   const result = new Array<ProjectType>();
@@ -108,7 +113,7 @@ export function readManifest(dir: string) {
   if (!fs.existsSync(jsiiFile)) {
     return undefined;
   } // no jsii manifest
-  let manifest = fs.readJsonSync(jsiiFile);
+  let manifest = JSON.parse(fs.readFileSync(jsiiFile, "utf-8"));
 
   if (manifest.schema === "jsii/file-redirect") {
     const compressedFile = path.join(dir, manifest.filename);
@@ -213,7 +218,7 @@ export function resolveProjectType(projectFqn: string): ProjectType {
   return toProjectType(jsii, projectFqn);
 }
 
-function toProjectType(jsii: JsiiTypes, fqn: string): ProjectType {
+export function toProjectType(jsii: JsiiTypes, fqn: string): ProjectType {
   if (!isProjectType(jsii, fqn)) {
     throw new Error(
       `Fully qualified name "${fqn}" is not a valid project type.`
@@ -225,9 +230,17 @@ function toProjectType(jsii: JsiiTypes, fqn: string): ProjectType {
   // projen.web.ReactProject -> web.ReactProject
   const typename = fqn.substring(fqn.indexOf(".") + 1);
 
-  const docsurl = `https://projen.io/api/API.html#projen-${typename
-    .toLocaleLowerCase()
-    .replace(/\./g, "-")}`;
+  // projen.web.ReactProject -> web
+  // projen.Project -> projen
+  const readmeFileName = typename.includes(".")
+    ? typename.split(".", 1)[0]
+    : typeinfo.assembly;
+
+  // * [java](https://projen.io/docs/api/java#javaproject-) - Java project.
+
+  const docsurl = `https://projen.io/docs/api/${readmeFileName}#${typename
+    .substring(typename.indexOf(".") + 1)
+    .toLowerCase()}-`;
   let pjid =
     typeinfo.docs?.custom?.pjid ?? snake(typename).replace(/_project$/, "");
   return {
@@ -235,9 +248,7 @@ function toProjectType(jsii: JsiiTypes, fqn: string): ProjectType {
     typename,
     pjid,
     fqn,
-    options: discoverOptions(jsii, fqn).sort((o1, o2) =>
-      o1.name.localeCompare(o2.name)
-    ),
+    options: discoverOptions(jsii, fqn),
     docs: typeinfo.docs?.summary,
     docsurl,
   } as ProjectType;
@@ -250,7 +261,7 @@ export function readJsiiManifest(jsiiFqn: string): any {
   }
 
   const jsiiManifestFile = require.resolve(`${moduleName}/.jsii`);
-  return fs.readJsonSync(jsiiManifestFile);
+  return JSON.parse(fs.readFileSync(jsiiManifestFile, "utf-8"));
 }
 
 function discoverOptions(jsii: JsiiTypes, fqn: string): ProjectOption[] {
@@ -274,7 +285,7 @@ function discoverOptions(jsii: JsiiTypes, fqn: string): ProjectOption[] {
 
   const opts = Object.values(options);
 
-  return opts.sort((a, b) => a.switch.localeCompare(b.switch));
+  return opts.sort((a, b) => a.name.localeCompare(b.name));
 
   function addOptions(
     ofqn?: string,
@@ -308,25 +319,15 @@ function discoverOptions(jsii: JsiiTypes, fqn: string): ProjectOption[] {
       }
 
       const isOptional = optional || prop.optional;
-      let defaultValue = prop.docs?.default;
+      const defaultValue = sanitizeValue(prop.docs?.default);
+      const pjnew = sanitizeValue(prop.docs?.custom?.pjnew);
 
-      if (defaultValue === "undefined") {
-        defaultValue = undefined;
-      }
-
-      // if this is a mandatory option and we have a default value, it has to be JSON-parsable to the correct type
-      if (!isOptional && defaultValue) {
-        if (!prop.type?.primitive) {
-          throw new Error(
-            `required option "${
-              prop.name
-            }" with a @default must use primitive types (string, number or boolean). type found is: ${JSON.stringify(
-              prop.type
-            )}`
-          );
-        }
-
-        checkDefaultIsParsable(prop.name, defaultValue, prop.type?.primitive);
+      // if this is a mandatory option and we have a default value,
+      // or the option is tagged to be rendered with an initial value,
+      // the value has to be JSON-parsable to the correct type
+      const initialValue = getInitialValue(defaultValue, pjnew, isOptional);
+      if (initialValue) {
+        checkDefaultIsParsable(prop.name, initialValue, prop.type);
       }
 
       options[prop.name] = filterUndefined({
@@ -341,6 +342,7 @@ function discoverOptions(jsii: JsiiTypes, fqn: string): ProjectOption[] {
         jsonLike: prop.type ? isJsonLike(jsii, prop.type) : undefined,
         switch: propPath.map((p) => snake(p).replace(/_/g, "-")).join("-"),
         default: defaultValue,
+        initialValue: initialValue,
         optional: isOptional,
         featured: prop.docs?.custom?.featured === "true",
         deprecated: prop.docs.stability === "deprecated" ? true : undefined,
@@ -351,6 +353,30 @@ function discoverOptions(jsii: JsiiTypes, fqn: string): ProjectOption[] {
       addOptions(ifc);
     }
   }
+}
+
+function getInitialValue(
+  defaultValue?: string,
+  pjnew?: string,
+  isOptional: boolean = false
+) {
+  if (pjnew) {
+    return pjnew;
+  }
+
+  if (!isOptional) {
+    return defaultValue;
+  }
+
+  return undefined;
+}
+
+function sanitizeValue(val?: string) {
+  if (val === "undefined") {
+    return undefined;
+  }
+
+  return val;
 }
 
 function getSimpleTypeName(type: JsiiPropertyType): string {
@@ -430,18 +456,59 @@ function isProjectType(jsii: JsiiTypes, fqn: string) {
   }
 }
 
-function checkDefaultIsParsable(prop: string, value: string, type: string) {
+function isPrimitiveArray({ collection }: JsiiPropertyType) {
+  return Boolean(
+    collection?.kind === "array" && collection?.elementtype.primitive
+  );
+}
+
+function isPrimitiveOrPrimitiveArray(type: JsiiPropertyType) {
+  return Boolean(type?.primitive || isPrimitiveArray(type));
+}
+
+function checkDefaultIsParsable(
+  prop: string,
+  value: string,
+  type?: JsiiPropertyType
+) {
+  if (!(type && isPrimitiveOrPrimitiveArray(type))) {
+    throw new Error(
+      `required option "${prop}" with a @default must use primitive types (string, number and boolean) or a primitive array. type found is: ${JSON.stringify(
+        type
+      )}`
+    );
+  }
+
   // macros are pass-through
   if (value.startsWith("$")) {
     return;
   }
+
   try {
     const parsed = JSON.parse(value);
-    if (typeof parsed !== type) {
-      throw new Error(
-        `cannot parse @default value for mandatory option ${prop} as a ${type}: ${parsed}`
-      );
+
+    // Primitive type
+    if (typeof parsed === type.primitive) {
+      return;
     }
+
+    // Primitive array
+    if (Array.isArray(parsed) && isPrimitiveArray(type)) {
+      // but empty (which is okay)
+      if (parsed.length === 0) {
+        return;
+      }
+
+      // if first element matches the type, assume it's correct
+      if (typeof parsed[0] === type?.collection?.elementtype.primitive) {
+        return;
+      }
+    }
+
+    // Parsed value does not match type
+    throw new Error(
+      `cannot parse @default value for mandatory option ${prop} as a ${type}: ${parsed}`
+    );
   } catch (e) {
     throw new Error(
       `unable to JSON.parse() value "${value}" specified as @default for mandatory option "${prop}": ${

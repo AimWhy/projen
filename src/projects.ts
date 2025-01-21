@@ -12,8 +12,8 @@ export interface CreateProjectOptions {
 
   /**
    * Fully-qualified name of the project type (usually formatted
-   * as `module.ProjectType`).
-   * @example `projen.TypescriptProject`
+   * as `projen.module.ProjectType`).
+   * @example `projen.typescript.TypescriptProject`
    */
   readonly projectFqn: string;
 
@@ -64,6 +64,10 @@ export class Projects {
    * At the moment, it also generates a `.projenrc.js` file with the same code
    * that was just executed. In the future, this will also be done by the project
    * type, so we can easily support multiple languages of projenrc.
+   *
+   * An environment variable (PROJEN_CREATE_PROJECT=true) is set within the VM
+   * so that custom project types can detect whether the current synthesis is the
+   * result of a new project creation (and take additional steps accordingly)
    */
   public static createProject(options: CreateProjectOptions) {
     createProject(options);
@@ -72,39 +76,49 @@ export class Projects {
   private constructor() {}
 }
 
-function createProject(opts: CreateProjectOptions) {
-  const projectType = resolveProjectType(opts.projectFqn);
-
+function resolveModulePath(moduleName: string) {
   // Default project resolution location
-  let mod = "./index";
+  if (moduleName === "projen") {
+    return "./index";
+  }
 
   // External projects need to load the module from the modules directory
-  if (projectType.moduleName !== "projen") {
-    try {
-      mod = path.dirname(
-        require.resolve(path.join(projectType.moduleName, "package.json"), {
-          paths: [process.cwd()],
-        })
-      );
-    } catch (err) {
-      throw new Error(
-        `External project module '${projectType.moduleName}' could not be resolved.`
-      );
-    }
+  try {
+    return path.dirname(
+      require.resolve(path.join(moduleName, "package.json"), {
+        paths: [process.cwd()],
+      })
+    );
+  } catch (err) {
+    throw new Error(
+      `External project module '${moduleName}' could not be resolved.`
+    );
   }
+}
+
+function createProject(opts: CreateProjectOptions) {
+  const projectType = resolveProjectType(opts.projectFqn);
+  const mod = resolveModulePath(projectType.moduleName);
 
   // "dir" is exposed as a top-level option to require users to specify a value for it
   opts.projectOptions.outdir = opts.dir;
 
+  // Generated a random name space for imports used by options
+  // This is so we can keep the top-level namespace as clean as possible
+  const optionsImports = "_options" + Math.random().toString(36).slice(2);
+
   // pass the FQN of the project type to the project initializer so it can
   // generate the projenrc file.
-  const { renderedOptions } = renderJavaScriptOptions({
+  const { renderedOptions, imports } = renderJavaScriptOptions({
     bootstrap: true,
     comments: opts.optionHints ?? InitProjectOptionHints.FEATURED,
     type: projectType,
     args: opts.projectOptions,
     omitFromBootstrap: ["outdir"],
+    prefixImports: optionsImports,
   });
+
+  const initProjectCode = new Array<string>();
 
   // generate a random variable name because jest tests appear to share
   // VM contexts, causing
@@ -113,17 +127,32 @@ function createProject(opts: CreateProjectOptions) {
   //
   // errors if this isn't unique
   const varName = "project" + Math.random().toString(36).slice(2);
-  const initProjectCode = `const ${varName} = new ${projectType.typename}(${renderedOptions});`;
+  initProjectCode.push(
+    `const ${varName} = new ${projectType.typename}(${renderedOptions});`
+  );
+
+  if (opts.synth ?? true) {
+    initProjectCode.push(`${varName}.synth();`);
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const module = require(mod);
-  const ctx = vm.createContext(module);
+  const mainModule = require(mod);
+  const ctx = vm.createContext({
+    ...mainModule,
+    [optionsImports]: {
+      ...imports.modules.reduce(
+        (optionsContext, currentModule) => ({
+          ...optionsContext,
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          [currentModule]: require(resolveModulePath(currentModule)),
+        }),
+        {}
+      ),
+    },
+  });
 
-  const synth = opts.synth ?? true;
   const postSynth = opts.post ?? true;
   process.env.PROJEN_DISABLE_POST = (!postSynth).toString();
-  vm.runInContext(
-    [initProjectCode, synth ? `${varName}.synth();` : ""].join("\n"),
-    ctx
-  );
+  process.env.PROJEN_CREATE_PROJECT = "true";
+  vm.runInContext(initProjectCode.join("\n"), ctx);
 }

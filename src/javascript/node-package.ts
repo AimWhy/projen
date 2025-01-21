@@ -1,26 +1,27 @@
-import { readFileSync } from "fs";
-import { join, resolve } from "path";
-import { parse as urlparse } from "url";
 import {
   accessSync,
   constants,
   existsSync,
   readdirSync,
-  readJsonSync,
-} from "fs-extra";
+  readFileSync,
+} from "fs";
+import { join, resolve } from "path";
+import * as semver from "semver";
+import {
+  extractCodeArtifactDetails,
+  minVersion,
+  tryResolveDependencyVersion,
+} from "./util";
+import { Yarnrc, YarnrcOptions } from "./yarnrc";
 import { resolve as resolveJson } from "../_resolve";
 import { Component } from "../component";
-import { Dependencies, DependencyType } from "../dependencies";
+import { DependencyType } from "../dependencies";
 import { JsonFile } from "../json";
 import { Project } from "../project";
 import { isAwsCodeArtifactRegistry } from "../release";
 import { Task } from "../task";
-import { exec, isTruthy, sorted, writeFile } from "../util";
-import {
-  extractCodeArtifactDetails,
-  minVersion,
-  packageResolutionsFieldName,
-} from "./util";
+import { TaskRuntime } from "../task-runtime";
+import { isTruthy, normalizePersistedPath, sorted, writeFile } from "../util";
 
 const UNLICENSED = "UNLICENSED";
 const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
@@ -158,15 +159,17 @@ export interface NodePackageOptions {
   /**
    * npm scripts to include. If a script has the same name as a standard script,
    * the standard script will be overwritten.
+   * Also adds the script as a task.
    *
    * @default {}
+   * @deprecated use `project.addTask()` or `package.setScript()`
    */
   readonly scripts?: { [name: string]: string };
 
   /**
    * The Node Package Manager used to execute scripts
    *
-   * @default NodePackageManager.YARN
+   * @default NodePackageManager.YARN_CLASSIC
    */
   readonly packageManager?: NodePackageManager;
 
@@ -198,7 +201,7 @@ export interface NodePackageOptions {
   readonly authorUrl?: string;
 
   /**
-   * Author's Organization
+   * Is the author an organization
    */
   readonly authorOrganization?: boolean;
 
@@ -213,18 +216,51 @@ export interface NodePackageOptions {
   readonly stability?: string;
 
   /**
-   * Minimum Node.js version to require via package.json `engines` (inclusive).
+   * The minimum node version required by this package to function.
+   * Most projects should not use this option.
    *
-   * @default - no "engines" specified
+   * The value indicates that the package is incompatible with any older versions of node.
+   * This requirement is enforced via the engines field.
+   *
+   * You will normally not need to set this option, even if your package is incompatible with EOL versions of node.
+   * Consider this option only if your package depends on a specific feature, that is not available in other LTS versions.
+   * Setting this option has very high impact on the consumers of your package,
+   * as package managers will actively prevent usage with node versions you have marked as incompatible.
+   *
+   * To change the node version of your CI/CD workflows, use `workflowNodeVersion`.
+   *
+   * @default - no minimum version is enforced
+
    */
   readonly minNodeVersion?: string;
 
   /**
-   * Minimum node.js version to require via `engines` (inclusive).
+   * The maximum node version supported by this package.
+   * Most projects should not use this option.
    *
-   * @default - no max
+   * The value indicates that the package is incompatible with any newer versions of node.
+   * This requirement is enforced via the engines field.
+   *
+   * You will normally not need to set this option.
+   * Consider this option only if your package is known to not function with newer versions of node.
+   *
+   * @default - no maximum version is enforced
    */
   readonly maxNodeVersion?: string;
+
+  /**
+   * The version of PNPM to use if using PNPM as a package manager.
+   *
+   * @default "9"
+   */
+  readonly pnpmVersion?: string;
+
+  /**
+   * The version of Bun to use if using Bun as a package manager.
+   *
+   * @default "latest"
+   */
+  readonly bunVersion?: string;
 
   /**
    * License's SPDX identifier.
@@ -278,6 +314,20 @@ export interface NodePackageOptions {
   readonly npmAccess?: NpmAccess;
 
   /**
+   * Should provenance statements be generated when the package is published.
+   *
+   * A supported package manager is required to publish a package with npm provenance statements and
+   * you will need to use a supported CI/CD provider.
+   *
+   * Note that the projen `Release` and `Publisher` components are using `publib` to publish packages,
+   * which is using npm internally and supports provenance statements independently of the package manager used.
+   *
+   * @see https://docs.npmjs.com/generating-provenance-statements
+   * @default - true for public packages, false otherwise
+   */
+  readonly npmProvenance?: boolean;
+
+  /**
    * GitHub secret which contains the NPM token to use when publishing packages.
    *
    * @default "NPM_TOKEN"
@@ -298,14 +348,52 @@ export interface NodePackageOptions {
    * @default - fetch all scoped packages from the public npm registry
    */
   readonly scopedPackagesOptions?: ScopedPackagesOptions[];
+
+  /**
+   * Options for Yarn Berry
+   *
+   * @default - Yarn Berry v4 with all default options
+   */
+  readonly yarnBerryOptions?: YarnBerryOptions;
 }
 
+/**
+ * Options for authorizing requests to a AWS CodeArtifact npm repository.
+ */
+export enum CodeArtifactAuthProvider {
+  /**
+   * Fixed credentials provided via Github secrets.
+   */
+  ACCESS_AND_SECRET_KEY_PAIR = "ACCESS_AND_SECRET_KEY_PAIR",
+
+  /**
+   * Ephemeral credentials provided via Github's OIDC integration with an IAM role.
+   * See:
+   * https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html
+   * https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+   */
+  GITHUB_OIDC = "GITHUB_OIDC",
+}
+
+/**
+ * Options for publishing npm packages to AWS CodeArtifact.
+ */
 export interface CodeArtifactOptions {
+  /**
+   * Provider to use for authorizing requests to AWS CodeArtifact.
+   *
+   * @default CodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR
+   */
+  readonly authProvider?: CodeArtifactAuthProvider;
+
   /**
    * GitHub secret which contains the AWS access key ID to use when publishing packages to AWS CodeArtifact.
    * This property must be specified only when publishing to AWS CodeArtifact (`npmRegistryUrl` contains AWS CodeArtifact URL).
    *
-   * @default "AWS_ACCESS_KEY_ID"
+   * @default - When the `authProvider` value is set to
+   * `CodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR`, the default is
+   * "AWS_ACCESS_KEY_ID". For `CodeArtifactAuthProvider.GITHUB_OIDC`, this
+   * value must be left undefined.
    */
   readonly accessKeyIdSecret?: string;
 
@@ -313,13 +401,17 @@ export interface CodeArtifactOptions {
    * GitHub secret which contains the AWS secret access key to use when publishing packages to AWS CodeArtifact.
    * This property must be specified only when publishing to AWS CodeArtifact (`npmRegistryUrl` contains AWS CodeArtifact URL).
    *
-   * @default "AWS_SECRET_ACCESS_KEY"
+   * @default - When the `authProvider` value is set to
+   * `CodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR`, the default is
+   * "AWS_SECRET_ACCESS_KEY". For `CodeArtifactAuthProvider.GITHUB_OIDC`, this
+   * value must be left undefined.
    */
   readonly secretAccessKeySecret?: string;
 
   /**
    * ARN of AWS role to be assumed prior to get authorization token from AWS CodeArtifact
    * This property must be specified only when publishing to AWS CodeArtifact (`registry` contains AWS CodeArtifact URL).
+   * When using the `CodeArtifactAuthProvider.GITHUB_OIDC` auth provider, this value must be defined.
    *
    * @default undefined
    */
@@ -348,6 +440,17 @@ export interface ScopedPackagesOptions {
  */
 export class NodePackage extends Component {
   /**
+   * Returns the `NodePackage` instance associated with a project or `undefined` if
+   * there is no NodePackage.
+   * @param project The project
+   * @returns A NodePackage, or undefined
+   */
+  public static of(project: Project): NodePackage | undefined {
+    const isIt = (o: Component): o is NodePackage => o instanceof NodePackage;
+    return project.components.find(isIt);
+  }
+
+  /**
    * The name of the npm package.
    */
   public readonly packageName: string;
@@ -373,16 +476,28 @@ export class NodePackage extends Component {
   public readonly manifest: any;
 
   /**
-   * Minimum node.js version required by this package.
-   * @default - no minimum
+   * The minimum node version required by this package to function.
+   *
+   * This value indicates the package is incompatible with older versions.
    */
   public readonly minNodeVersion?: string;
 
   /**
-   * Maximum node version required by this pacakge.
-   * @default - no maximum.
+   * Maximum node version supported by this package.
+   *
+   * The value indicates the package is incompatible with newer versions.
    */
   public readonly maxNodeVersion?: string;
+
+  /**
+   * The version of PNPM to use if using PNPM as a package manager.
+   */
+  public readonly pnpmVersion?: string;
+
+  /**
+   * The version of Bun to use if using Bun as a package manager.
+   */
+  public readonly bunVersion?: string;
 
   /**
    * The SPDX license of this module. `undefined` if this package is not licensed.
@@ -425,15 +540,37 @@ export class NodePackage extends Component {
   public readonly npmAccess: NpmAccess;
 
   /**
+   * Should provenance statements be generated when package is published.
+   */
+  public readonly npmProvenance: boolean;
+
+  /**
    * The name of the lock file.
    */
   public readonly lockFile: string;
 
+  /**
+   * The task for installing project dependencies (non-frozen)
+   */
+  public readonly installTask: Task;
+
+  /**
+   * The task for installing project dependencies (frozen)
+   */
+  public readonly installCiTask: Task;
+
+  /**
+   * The package.json file.
+   */
+  public readonly file: JsonFile;
+
+  private readonly scripts: Record<string, string> = {};
+  private readonly scriptsToBeRemoved = new Set<string>();
   private readonly keywords: Set<string> = new Set();
   private readonly bin: Record<string, string> = {};
   private readonly engines: Record<string, string> = {};
   private readonly peerDependencyOptions: PeerDependencyOptions;
-  private readonly file: JsonFile;
+  private readonly _prev?: Record<string, any>;
   private _renderedDeps?: NpmDependencies;
 
   constructor(project: Project, options: NodePackageOptions = {}) {
@@ -445,7 +582,8 @@ export class NodePackage extends Component {
       ...options.peerDependencyOptions,
     };
     this.allowLibraryDependencies = options.allowLibraryDependencies ?? true;
-    this.packageManager = options.packageManager ?? NodePackageManager.YARN;
+    this.packageManager =
+      options.packageManager ?? NodePackageManager.YARN_CLASSIC;
     this.entrypoint = options.entrypoint ?? "lib/index.js";
     this.lockFile = determineLockfile(this.packageManager);
 
@@ -458,6 +596,7 @@ export class NodePackage extends Component {
       npmTokenSecret,
       codeArtifactOptions,
       scopedPackagesOptions,
+      npmProvenance,
     } = this.parseNpmOptions(options);
     this.npmAccess = npmAccess;
     this.npmRegistry = npmRegistry;
@@ -465,12 +604,11 @@ export class NodePackage extends Component {
     this.npmTokenSecret = npmTokenSecret;
     this.codeArtifactOptions = codeArtifactOptions;
     this.scopedPackagesOptions = scopedPackagesOptions;
+    this.npmProvenance = npmProvenance;
 
     this.processDeps(options);
 
-    this.addCodeArtifactLoginScript();
-
-    const prev = this.readPackageJson() ?? {};
+    this._prev = this.readPackageJson();
 
     // empty objects are here to preserve order for backwards compatibility
     this.manifest = {
@@ -490,16 +628,18 @@ export class NodePackage extends Component {
       peerDependencies: {},
       dependencies: {},
       bundledDependencies: [],
+      ...this.renderPackageResolutions(),
       keywords: () => this.renderKeywords(),
       engines: () => this.renderEngines(),
       main: this.entrypoint !== "" ? this.entrypoint : undefined,
       license: () => this.license ?? UNLICENSED,
       homepage: options.homepage,
       publishConfig: () => this.renderPublishConfig(),
+      typesVersions: this._prev?.typesVersions,
 
       // in release CI builds we bump the version before we run "build" so we want
       // to preserve the version number. otherwise, we always set it to 0.0.0
-      version: this.determineVersion(prev?.version),
+      version: this.determineVersion(this._prev?.version),
       bugs:
         options.bugsEmail || options.bugsUrl
           ? {
@@ -509,15 +649,24 @@ export class NodePackage extends Component {
           : undefined,
     };
 
-    // override any scripts from options (if specified)
+    // Configure Yarn Berry if using
+    if (
+      this.packageManager === NodePackageManager.YARN_BERRY ||
+      this.packageManager === NodePackageManager.YARN2
+    ) {
+      this.configureYarnBerry(project, options);
+    }
+
+    // add tasks for scripts from options (if specified)
+    // @deprecated
     for (const [cmdname, shell] of Object.entries(options.scripts ?? {})) {
       project.addTask(cmdname, { exec: shell });
     }
 
-    this.file = new JsonFile(this.project, "package.json", {
+    this.file = new JsonFile(this, "package.json", {
       obj: this.manifest,
       readonly: false, // we want "yarn add" to work and we have anti-tamper
-      newline: false, // when file is edited by npm/yarn it doesn't include a newline
+      newline: true, // all package managers prefer a newline, see https://github.com/projen/projen/issues/2076
       committed: true, // needs to be committed so users can install the dependencies
     });
 
@@ -532,12 +681,27 @@ export class NodePackage extends Component {
     // node version
     this.minNodeVersion = options.minNodeVersion;
     this.maxNodeVersion = options.maxNodeVersion;
+    this.pnpmVersion = options.pnpmVersion ?? "9";
+    this.bunVersion = options.bunVersion ?? "latest";
     this.addNodeEngine();
+
+    this.addCodeArtifactLoginScript();
 
     // license
     if (options.licensed ?? true) {
       this.license = options.license ?? "Apache-2.0";
     }
+
+    this.installTask = project.addTask("install", {
+      description:
+        "Install project dependencies and update lockfile (non-frozen)",
+      exec: this.installAndUpdateLockfileCommand,
+    });
+
+    this.installCiTask = project.addTask("install:ci", {
+      description: "Install project dependencies using frozen lockfile",
+      exec: this.installCommand,
+    });
   }
 
   /**
@@ -647,21 +811,24 @@ export class NodePackage extends Component {
   }
 
   /**
-   * Override the contents of an npm package.json script.
+   * Add a npm package.json script.
    *
    * @param name The script name
    * @param command The command to execute
    */
   public setScript(name: string, command: string) {
-    this.file.addOverride(`scripts.${name}`, command);
+    this.scripts[name] = command;
   }
 
   /**
-   * Removes the npm script (always successful).
+   * Removes an npm script (always successful).
+   *
    * @param name The name of the script.
    */
   public removeScript(name: string) {
-    this.file.addDeletionOverride(`scripts.${name}`);
+    // need to keep track in case there's a task of the same name
+    this.scriptsToBeRemoved.add(name);
+    delete this.scripts[name];
   }
 
   /**
@@ -697,14 +864,11 @@ export class NodePackage extends Component {
    *
    * @param resolutions Names resolutions to be added. Specify a version or
    * range with this syntax:
-   * `module@^7`.
+   * `module@^7`
    */
   public addPackageResolutions(...resolutions: string[]) {
-    const fieldName = packageResolutionsFieldName(this.packageManager);
-
     for (const resolution of resolutions) {
-      const { name, version = "*" } = Dependencies.parseDependency(resolution);
-      this.file.addOverride(`${fieldName}.${name}`, version);
+      this.project.deps.addDependency(resolution, DependencyType.OVERRIDE);
     }
   }
 
@@ -723,55 +887,35 @@ export class NodePackage extends Component {
   }
 
   /**
-   * Render a package manager specific command to upgrade all requested dependencies.
+   * Attempt to resolve the currently installed version for a given dependency.
+   *
+   * @remarks
+   * This method will first look through the current project's dependencies.
+   * If found and semantically valid (not '*'), that will be used.
+   * Otherwise, it will fall back to locating a `package.json` manifest for the dependency
+   * through node's internal resolution reading the version from there.
+   *
+   * @param dependencyName Dependency to resolve for.
    */
-  public renderUpgradePackagesCommand(
-    exclude: string[],
-    include?: string[]
-  ): string {
-    const project = this.project;
-    function upgradePackages(command: string) {
-      return () => {
-        if (exclude.length === 0 && !include) {
-          // request to upgrade all packages
-          // separated for asthetic reasons.
-          return command;
-        }
-
-        // filter by exclude and include.
-        return `${command} ${project.deps.all
-          .map((d) => d.name)
-          .filter((d) => (include ? include.includes(d) : true))
-          .filter((d) => !exclude.includes(d))
-          .join(" ")}`;
-      };
-    }
-
-    let lazy = undefined;
-    switch (this.packageManager) {
-      case NodePackageManager.YARN:
-        lazy = upgradePackages("yarn upgrade");
-        break;
-      case NodePackageManager.NPM:
-        lazy = upgradePackages("npm update");
-        break;
-      case NodePackageManager.PNPM:
-        lazy = upgradePackages("pnpm update");
-        break;
-      default:
-        throw new Error(`unexpected package manager ${this.packageManager}`);
-    }
-
-    // return a lazy function so that dependencies include ones that were
-    // added post project instantiation (i.e using project.addDeps)
-    return lazy as unknown as string;
+  public tryResolveDependencyVersion(
+    dependencyName: string
+  ): string | undefined {
+    try {
+      const fromDeps = this.project.deps.tryGetDependency(dependencyName);
+      const version = semver.coerce(fromDeps?.version, { loose: true });
+      if (version) {
+        return version.format();
+      }
+    } catch {}
+    return tryResolveDependencyVersion(dependencyName, {
+      paths: [this.project.outdir],
+    });
   }
 
   // ---------------------------------------------------------------------------------------
-
-  public preSynthesize() {
-    super.preSynthesize();
+  public synthesize() {
     this._renderedDeps = this.renderDependencies();
+    super.synthesize();
   }
 
   public postSynthesize() {
@@ -795,6 +939,7 @@ export class NodePackage extends Component {
 
   /**
    * The command which executes "projen".
+   * @deprecated use `project.projenCommand` instead.
    */
   public get projenCommand() {
     return this.project.projenCommand;
@@ -836,7 +981,7 @@ export class NodePackage extends Component {
       npmRegistryUrl = `https://${options.npmRegistry}`;
     }
 
-    const npmr = urlparse(npmRegistryUrl ?? DEFAULT_NPM_REGISTRY_URL);
+    const npmr = new URL(npmRegistryUrl ?? DEFAULT_NPM_REGISTRY_URL);
     if (!npmr || !npmr.hostname || !npmr.href) {
       throw new Error(
         `unable to determine npm registry host from url ${npmRegistryUrl}. Is this really a URL?`
@@ -850,6 +995,14 @@ export class NodePackage extends Component {
       );
     }
 
+    const npmProvenance =
+      options.npmProvenance ?? npmAccess === NpmAccess.PUBLIC;
+    if (npmProvenance && npmAccess !== NpmAccess.PUBLIC) {
+      throw new Error(
+        `"npmProvenance" can only be enabled for public packages`
+      );
+    }
+
     const isAwsCodeArtifact = isAwsCodeArtifactRegistry(npmRegistryUrl);
     const hasScopedPackage =
       options.scopedPackagesOptions &&
@@ -860,6 +1013,22 @@ export class NodePackage extends Component {
         throw new Error(
           '"npmTokenSecret" must not be specified when publishing AWS CodeArtifact.'
         );
+      } else if (
+        options.codeArtifactOptions?.authProvider ===
+        CodeArtifactAuthProvider.GITHUB_OIDC
+      ) {
+        if (
+          options.codeArtifactOptions.accessKeyIdSecret ||
+          options.codeArtifactOptions.secretAccessKeySecret
+        ) {
+          throw new Error(
+            "access and secret key pair should not be provided when using GITHUB_OIDC auth provider for AWS CodeArtifact"
+          );
+        } else if (!options.codeArtifactOptions.roleToAssume) {
+          throw new Error(
+            '"roleToAssume" property is required when using GITHUB_OIDC for AWS CodeArtifact options'
+          );
+        }
       }
     } else {
       if (
@@ -877,12 +1046,19 @@ export class NodePackage extends Component {
     // apply defaults for AWS CodeArtifact
     let codeArtifactOptions: CodeArtifactOptions | undefined;
     if (isAwsCodeArtifact || hasScopedPackage) {
+      const authProvider =
+        options.codeArtifactOptions?.authProvider ??
+        CodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR;
+      const isAccessSecretKeyPairAuth =
+        authProvider === CodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR;
       codeArtifactOptions = {
+        authProvider,
         accessKeyIdSecret:
-          options.codeArtifactOptions?.accessKeyIdSecret ?? "AWS_ACCESS_KEY_ID",
+          options.codeArtifactOptions?.accessKeyIdSecret ??
+          (isAccessSecretKeyPairAuth ? "AWS_ACCESS_KEY_ID" : undefined),
         secretAccessKeySecret:
           options.codeArtifactOptions?.secretAccessKeySecret ??
-          "AWS_SECRET_ACCESS_KEY",
+          (isAccessSecretKeyPairAuth ? "AWS_SECRET_ACCESS_KEY" : undefined),
         roleToAssume: options.codeArtifactOptions?.roleToAssume,
       };
     }
@@ -896,6 +1072,7 @@ export class NodePackage extends Component {
       scopedPackagesOptions: this.parseScopedPackagesOptions(
         options.scopedPackagesOptions
       ),
+      npmProvenance,
     };
   }
 
@@ -949,8 +1126,9 @@ export class NodePackage extends Component {
             `npm config set ${scope}:registry ${registryUrl}`,
             `CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain ${domain} --region ${region} --domain-owner ${accountId} --query authorizationToken --output text)`,
             `npm config set //${registry}:_authToken=$CODEARTIFACT_AUTH_TOKEN`,
-            `npm config set //${registry}:always-auth=true`,
           ];
+          if (!this.minNodeVersion || semver.major(this.minNodeVersion) <= 16)
+            commands.push(`npm config set //${registry}:always-auth=true`);
           return {
             exec: commands.join("; "),
           };
@@ -985,19 +1163,25 @@ export class NodePackage extends Component {
   private renderInstallCommand(frozen: boolean) {
     switch (this.packageManager) {
       case NodePackageManager.YARN:
+      case NodePackageManager.YARN_CLASSIC:
         return [
           "yarn install",
           "--check-files", // ensure all modules exist (especially projen which was just removed).
           ...(frozen ? ["--frozen-lockfile"] : []),
         ].join(" ");
-
+      case NodePackageManager.YARN2:
+      case NodePackageManager.YARN_BERRY:
+        return ["yarn install", ...(frozen ? ["--immutable"] : [])].join(" ");
       case NodePackageManager.NPM:
         return frozen ? "npm ci" : "npm install";
-
       case NodePackageManager.PNPM:
         return frozen
           ? "pnpm i --frozen-lockfile"
           : "pnpm i --no-frozen-lockfile";
+      case NodePackageManager.BUN:
+        return ["bun install", ...(frozen ? ["--frozen-lockfile"] : [])].join(
+          " "
+        );
 
       default:
         throw new Error(`unexpected package manager ${this.packageManager}`);
@@ -1025,9 +1209,14 @@ export class NodePackage extends Component {
       )) {
         let req = dep.name;
 
-        // skip if we already have a runtime dependency on this peer
+        // Skip if we already have a runtime dependency on this peer and no build dependency yet.
+        // If there is a build dep already, we need to override its version.
         if (
-          this.project.deps.tryGetDependency(dep.name, DependencyType.RUNTIME)
+          this.project.deps.tryGetDependency(
+            dep.name,
+            DependencyType.RUNTIME
+          ) &&
+          !this.project.deps.tryGetDependency(dep.name, DependencyType.BUILD)
         ) {
           continue;
         }
@@ -1067,13 +1256,19 @@ export class NodePackage extends Component {
         case DependencyType.BUNDLED:
           bundledDependencies.push(name);
 
-          if (
-            this.project.deps.all.find(
-              (d) => d.name === name && d.type === DependencyType.PEER
-            )
-          ) {
+          const depDecls = this.project.deps.all.filter((d) => d.name === name);
+          if (depDecls.some((d) => d.type === DependencyType.PEER)) {
             throw new Error(
-              `unable to bundle "${name}". it cannot appear as a peer dependency`
+              `unable to bundle "${name}": it cannot appear as a peer dependency (bundled would always take precedence over peer)`
+            );
+          }
+
+          // I've observed that at least npm 10.8.2 will silently fail to bundle
+          // a dependency if it is [also] part of `devDependencies`. It must exist in
+          // `dependencies` and `dependencies` only.
+          if (depDecls.some((d) => d.type === DependencyType.BUILD)) {
+            throw new Error(
+              `unable to bundle "${name}": it cannot appear as a devDependency (only prod dependencies are bundled, and any dependency appearing as a devDependency is considered to be not a prod dependency)`
             );
           }
 
@@ -1107,8 +1302,7 @@ export class NodePackage extends Component {
     this.manifest.bundledDependencies = sorted(bundledDependencies);
 
     // nothing further to do if package.json file does not exist
-    const pkg = this.readPackageJson();
-    if (!pkg) {
+    if (!this._prev) {
       return { devDependencies, peerDependencies, dependencies };
     }
 
@@ -1136,9 +1330,9 @@ export class NodePackage extends Component {
       }
     };
 
-    readDeps(devDependencies, pkg.devDependencies);
-    readDeps(dependencies, pkg.dependencies);
-    readDeps(peerDependencies, pkg.peerDependencies);
+    readDeps(devDependencies, this._prev.devDependencies);
+    readDeps(dependencies, this._prev.dependencies);
+    readDeps(peerDependencies, this._prev.peerDependencies);
 
     return { devDependencies, dependencies, peerDependencies };
   }
@@ -1169,20 +1363,18 @@ export class NodePackage extends Component {
         let desiredVersion = currentDefinition;
 
         if (currentDefinition === "*") {
-          try {
-            const modulePath = require.resolve(`${name}/package.json`, {
-              paths: [outdir],
-            });
-            const module = readJsonSync(modulePath);
-            desiredVersion = `^${module.version}`;
-          } catch (e) {}
-
-          if (!desiredVersion) {
+          // we already know we don't have the version in project `deps`,
+          // so skip straight to checking manifest.
+          const resolvedVersion = tryResolveDependencyVersion(name, {
+            paths: [this.project.outdir],
+          });
+          if (!resolvedVersion) {
             this.project.logger.warn(
               `unable to resolve version for ${name} from installed modules`
             );
             continue;
           }
+          desiredVersion = `^${resolvedVersion}`;
         }
 
         if (currentDefinition !== desiredVersion) {
@@ -1241,12 +1433,7 @@ export class NodePackage extends Component {
     pkg.devDependencies = sorted(devDeps);
     pkg.peerDependencies = sorted(peerDeps);
 
-    const jsonContent = JSON.stringify(pkg, undefined, 2);
-
-    const updated =
-      this.packageManager === NodePackageManager.NPM
-        ? `${jsonContent}\n`
-        : jsonContent;
+    const updated = JSON.stringify(pkg, undefined, 2) + "\n";
 
     if (original === updated) {
       return false;
@@ -1256,7 +1443,44 @@ export class NodePackage extends Component {
     return true;
   }
 
+  private renderPackageResolutions() {
+    const render = () => {
+      const overridingDependencies = this.project.deps.all.filter(
+        (dep) => dep.type === DependencyType.OVERRIDE
+      );
+      if (!overridingDependencies.length) {
+        return undefined;
+      }
+
+      return Object.fromEntries(
+        overridingDependencies.map(({ name, version = "*" }) => [name, version])
+      );
+    };
+
+    switch (this.packageManager) {
+      case NodePackageManager.NPM:
+        return { overrides: render };
+      case NodePackageManager.PNPM:
+        return this.project.parent
+          ? undefined
+          : { pnpm: { overrides: render } };
+      case NodePackageManager.YARN:
+      case NodePackageManager.YARN2:
+      case NodePackageManager.YARN_CLASSIC:
+      case NodePackageManager.YARN_BERRY:
+      case NodePackageManager.BUN:
+      default:
+        return { resolutions: render };
+    }
+  }
+
   private renderPublishConfig() {
+    // When npm provenance is enabled, we need to always render the public access
+    // But when npmAccess is the set to the default, we prefer to omit it
+    const shouldOmitAccess =
+      !this.npmProvenance &&
+      this.npmAccess === defaultNpmAccess(this.packageName);
+
     // omit values if they are the same as the npm defaults
     return resolveJson(
       {
@@ -1264,10 +1488,7 @@ export class NodePackage extends Component {
           this.npmRegistryUrl !== DEFAULT_NPM_REGISTRY_URL
             ? this.npmRegistryUrl
             : undefined,
-        access:
-          this.npmAccess !== defaultNpmAccess(this.packageName)
-            ? this.npmAccess
-            : undefined,
+        access: shouldOmitAccess ? undefined : this.npmAccess,
       },
       { omitEmpty: true }
     );
@@ -1289,7 +1510,11 @@ export class NodePackage extends Component {
       for (const file of readdirSync(bindir)) {
         try {
           accessSync(join(bindir, file), constants.X_OK);
-          this.bin[file] = join(binrel, file).replace(/\\/g, "/");
+
+          const binPath = join(binrel, file);
+          const normalizedPath = normalizePersistedPath(binPath);
+
+          this.bin[file] = normalizedPath;
         } catch (e) {
           // not executable, skip
         }
@@ -1326,13 +1551,25 @@ export class NodePackage extends Component {
 
   private renderScripts() {
     const result: any = {};
-    for (const task of this.project.tasks.all.sort((x, y) =>
-      x.name.localeCompare(y.name)
-    )) {
+    const tasks = this.project.tasks.all
+      .filter(
+        (t) =>
+          // Must remove to prevent overriding built-in npm command (which would loop)
+          t.name !== this.installTask.name && t.name !== this.installCiTask.name
+      )
+      .sort((x, y) => x.name.localeCompare(y.name));
+
+    for (const task of tasks) {
+      if (this.scriptsToBeRemoved.has(task.name)) {
+        continue;
+      }
       result[task.name] = this.npmScriptForTask(task);
     }
 
-    return result;
+    return {
+      ...result,
+      ...this.scripts,
+    };
   }
 
   private npmScriptForTask(task: Task) {
@@ -1345,13 +1582,75 @@ export class NodePackage extends Component {
       return undefined;
     }
 
-    return readJsonSync(file);
+    return JSON.parse(readFileSync(file, "utf-8"));
   }
 
   private installDependencies() {
-    exec(this.renderInstallCommand(this.isAutomatedBuild), {
-      cwd: this.project.outdir,
-    });
+    this.project.logger.info("Installing dependencies...");
+    const runtime = new TaskRuntime(this.project.outdir);
+    const taskToRun = this.isAutomatedBuild
+      ? this.installCiTask
+      : this.installTask;
+    runtime.runTask(taskToRun.name);
+  }
+
+  private configureYarnBerry(project: Project, options: NodePackageOptions) {
+    const {
+      version = "4.0.1",
+      yarnRcOptions = {},
+      zeroInstalls = false,
+    } = options.yarnBerryOptions || {};
+    this.checkForConflictingYarnOptions(yarnRcOptions);
+
+    // Set the `packageManager` field in `package.json` to the version specified. This tells `corepack` which version
+    // of `yarn` to use.
+    this.addField("packageManager", `yarn@${version}`);
+    this.configureYarnBerryGitignore(zeroInstalls);
+
+    new Yarnrc(project, version, yarnRcOptions);
+  }
+
+  private checkForConflictingYarnOptions(yarnRcOptions: YarnrcOptions) {
+    if (
+      this.npmAccess &&
+      yarnRcOptions.npmPublishAccess &&
+      this.npmAccess.toString() !== yarnRcOptions.npmPublishAccess.toString()
+    ) {
+      throw new Error(
+        `Cannot set npmAccess (${this.npmAccess}) and yarnRcOptions.npmPublishAccess (${yarnRcOptions.npmPublishAccess}) to different values.`
+      );
+    }
+
+    if (
+      this.npmRegistryUrl &&
+      yarnRcOptions.npmRegistryServer &&
+      this.npmRegistryUrl !== yarnRcOptions.npmRegistryServer
+    ) {
+      throw new Error(
+        `Cannot set npmRegistryUrl (${this.npmRegistryUrl}) and yarnRcOptions.npmRegistryServer (${yarnRcOptions.npmRegistryServer}) to different values.`
+      );
+    }
+  }
+
+  /** See https://yarnpkg.com/getting-started/qa#which-files-should-be-gitignored */
+  private configureYarnBerryGitignore(zeroInstalls: boolean) {
+    const { gitignore } = this.project;
+
+    // These patterns are the same whether or not you're using zero-installs
+    gitignore.exclude(".yarn/*");
+    gitignore.include(
+      ".yarn/patches",
+      ".yarn/plugins",
+      ".yarn/releases",
+      ".yarn/sdks",
+      ".yarn/versions"
+    );
+
+    if (zeroInstalls) {
+      gitignore.include("!.yarn/cache");
+    } else {
+      gitignore.exclude(".pnp.*");
+    }
   }
 }
 
@@ -1369,8 +1668,27 @@ export interface PeerDependencyOptions {
 export enum NodePackageManager {
   /**
    * Use `yarn` as the package manager.
+   *
+   * @deprecated For `yarn` 1.x use `YARN_CLASSIC` for `yarn` >= 2 use `YARN_BERRY`. Currently, `NodePackageManager.YARN` means `YARN_CLASSIC`. In the future, we might repurpose it to mean `YARN_BERRY`.
    */
   YARN = "yarn",
+
+  /**
+   * Use `yarn` versions >= 2 as the package manager.
+   *
+   * @deprecated use YARN_BERRY instead
+   */
+  YARN2 = "yarn2",
+
+  /**
+   * Use `yarn` 1.x as the package manager.
+   */
+  YARN_CLASSIC = "yarn_classic",
+
+  /**
+   * Use `yarn` versions >= 2 as the package manager.
+   */
+  YARN_BERRY = "yarn_berry",
 
   /**
    * Use `npm` as the package manager.
@@ -1381,6 +1699,11 @@ export enum NodePackageManager {
    * Use `pnpm` as the package manager.
    */
   PNPM = "pnpm",
+
+  /**
+   * Use `bun` as the package manager
+   */
+  BUN = "bun",
 }
 
 /**
@@ -1396,6 +1719,33 @@ export enum NpmAccess {
    * Package can only be accessed with credentials.
    */
   RESTRICTED = "restricted",
+}
+
+/**
+ * Configure Yarn Berry
+ */
+export interface YarnBerryOptions {
+  /**
+   * A fully specified version to use for yarn (e.g., x.x.x)
+   *
+   * @default - 4.0.1
+   */
+  readonly version?: string;
+
+  /**
+   * The yarnrc configuration.
+   *
+   * @default - a blank Yarn RC file
+   */
+  readonly yarnRcOptions?: YarnrcOptions;
+
+  /**
+   * Should zero-installs be enabled?
+   * Learn more at: https://yarnpkg.com/features/caching#zero-installs
+   *
+   * @default false
+   */
+  readonly zeroInstalls?: boolean;
 }
 
 interface NpmDependencies {
@@ -1433,12 +1783,19 @@ export function defaultNpmToken(
 }
 
 function determineLockfile(packageManager: NodePackageManager) {
-  if (packageManager === NodePackageManager.YARN) {
+  if (
+    packageManager === NodePackageManager.YARN ||
+    packageManager === NodePackageManager.YARN2 ||
+    packageManager === NodePackageManager.YARN_CLASSIC ||
+    packageManager === NodePackageManager.YARN_BERRY
+  ) {
     return "yarn.lock";
   } else if (packageManager === NodePackageManager.NPM) {
     return "package-lock.json";
   } else if (packageManager === NodePackageManager.PNPM) {
     return "pnpm-lock.yaml";
+  } else if (packageManager === NodePackageManager.BUN) {
+    return "bun.lockb";
   }
 
   throw new Error(`unsupported package manager ${packageManager}`);

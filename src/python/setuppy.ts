@@ -57,6 +57,15 @@ export interface SetupPyOptions {
   /**
    * Escape hatch to allow any value
    */
+  readonly additionalOptions?: { [name: string]: any };
+
+  /**
+   * Escape hatch to allow any value (JS/TS only)
+   *
+   * @deprecated Prefer using `additionalOptions` instead.
+   *
+   * @jsii ignore
+   */
   readonly [name: string]: any;
 }
 
@@ -72,14 +81,15 @@ export class SetupPy extends FileBase {
     this.setupConfig = {
       name: project.name,
       packages: options.packages,
-      python_requires: ">=3.6",
+      python_requires: ">=3.8",
       classifiers: [
         "Intended Audience :: Developers",
         "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
       ],
       ...(options ? this.renameFields(options) : []),
     };
@@ -108,14 +118,21 @@ export class SetupPy extends FileBase {
   private renameFields(options: SetupPyOptions): any {
     const obj: { [key: string]: any } = {};
     for (const [key, value] of Object.entries(options)) {
-      if (key === "authorName") {
-        obj.author = value;
-      } else if (key === "authorEmail") {
-        obj.author_email = value;
-      } else if (key === "homepage") {
-        obj.url = value;
-      } else {
-        obj[key] = value;
+      switch (key) {
+        case "authorName":
+          obj.author = value;
+          break;
+        case "authorEmail":
+          obj.author_email = value;
+          break;
+        case "homepage":
+          obj.url = value;
+          break;
+        case "additionalOptions":
+          Object.assign(obj, this.renameFields(value));
+          break;
+        default:
+          obj[key] = value;
       }
     }
     return obj;

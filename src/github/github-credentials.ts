@@ -1,4 +1,5 @@
-import { JobStep } from "./workflows-model";
+import { JobStep, AppPermissions } from "./workflows-model";
+import { snakeCaseKeys } from "../util";
 
 /**
  * Options for `GithubCredentials.fromPersonalAccessToken`
@@ -13,6 +14,12 @@ export interface GithubCredentialsPersonalAccessTokenOptions {
 export interface GithubCredentialsAppOptions {
   readonly appIdSecret?: string;
   readonly privateKeySecret?: string;
+  /**
+   * The permissions granted to the token.
+   *
+   * @default - all permissions granted to the app
+   */
+  readonly permissions?: AppPermissions;
 }
 
 /**
@@ -45,7 +52,8 @@ export class GithubCredentials {
    * can be specified here.
    *
    * @see https://docs.github.com/en/developers/apps/building-github-apps/creating-a-github-app
-   * @default - app id stored in "PROJEN_GITHUB_TOKEN" and private key stored in "PROJEN_APP_PRIVATE_KEY"
+   * @see https://projen.io/docs/integrations/github/#github-app
+   * @default - app id stored in "PROJEN_APP_ID" and private key stored in "PROJEN_APP_PRIVATE_KEY" with all permissions attached to the app
    */
   public static fromApp(options: GithubCredentialsAppOptions = {}) {
     const appIdSecret = options.appIdSecret ?? "PROJEN_APP_ID";
@@ -57,10 +65,13 @@ export class GithubCredentials {
         {
           name: "Generate token",
           id: "generate_token",
-          uses: "tibdex/github-app-token@7ce9ffdcdeb2ba82b01b51d6584a6a85872336d4",
+          uses: "tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a",
           with: {
             app_id: `\${{ secrets.${appIdSecret} }}`,
             private_key: `\${{ secrets.${privateKeySecret} }}`,
+            permissions: options.permissions
+              ? JSON.stringify(snakeCaseKeys(options.permissions))
+              : undefined,
           },
         },
       ],

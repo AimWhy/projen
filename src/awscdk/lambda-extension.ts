@@ -1,15 +1,15 @@
 import { basename, dirname, join, relative } from "path";
 import { pascal } from "case";
-import { Component } from "../component";
-import { Bundler, BundlingOptions, Eslint } from "../javascript";
-import { Project } from "../project";
-import { SourceCode } from "../source-code";
 import { AwsCdkDeps } from "./awscdk-deps";
 import {
   convertToPosixPath,
   TYPESCRIPT_LAMBDA_EXTENSION_EXT,
 } from "./internal";
 import { LambdaRuntime } from "./lambda-function";
+import { Component } from "../component";
+import { Bundler, BundlingOptions, Eslint } from "../javascript";
+import { Project } from "../project";
+import { SourceCode } from "../source-code";
 
 /**
  * Common options for creating lambda extensions.
@@ -97,6 +97,9 @@ export class LambdaExtension extends Component {
     }
 
     const compatibleRuntimes = options.compatibleRuntimes ?? [
+      LambdaRuntime.NODEJS_22_X,
+      LambdaRuntime.NODEJS_20_X,
+      LambdaRuntime.NODEJS_18_X,
       LambdaRuntime.NODEJS_16_X,
       LambdaRuntime.NODEJS_14_X,
       LambdaRuntime.NODEJS_12_X,
@@ -119,7 +122,7 @@ export class LambdaExtension extends Component {
     const bundle = bundler.addBundle(options.entrypoint, {
       platform: bundlerRuntime.esbuildPlatform,
       target: bundlerRuntime.esbuildTarget,
-      externals: ["aws-sdk"],
+      externals: bundlerRuntime.defaultExternals,
       outfile: `extensions/${name}`,
       // Make the output executable because Lambda expects to run
       // extensions as stand-alone programs alongside the main lambda

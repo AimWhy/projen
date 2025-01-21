@@ -1,5 +1,5 @@
-import { Component } from "../component";
 import { GitHub } from "./github";
+import { Component } from "../component";
 
 export interface AutoMergeOptions {
   /**
@@ -13,6 +13,18 @@ export interface AutoMergeOptions {
    * @default ['do-not-merge']
    */
   readonly blockingLabels?: string[];
+
+  /**
+   * Name of the mergify rule
+   * @default 'Automatic merge on approval and successful build'
+   */
+  readonly ruleName?: string;
+
+  /**
+   * Name of the mergify queue
+   * @default 'default'
+   */
+  readonly queueName?: string;
 }
 
 /**
@@ -44,16 +56,7 @@ export class AutoMerge extends Component {
       delete_head_branch: {},
 
       queue: {
-        // squash all commits into a single commit when merging
-        // method: "squash",
-        method: "squash",
         name: "default",
-        // use PR title+body as the commit message
-        commit_message_template: [
-          "{{ title }} (#{{ number }})",
-          "",
-          "{{ body }}",
-        ].join("\n"),
       },
     };
 
@@ -63,15 +66,28 @@ export class AutoMerge extends Component {
     this.addConditions(`#approved-reviews-by>=${approvedReviews}`);
     this.addConditions(...blockingCondition);
 
+    const ruleName =
+      options.ruleName ?? "Automatic merge on approval and successful build";
+    const queueName = options.queueName ?? "default";
+
     mergify.addRule({
-      name: "Automatic merge on approval and successful build",
+      name: ruleName,
       actions: mergeAction,
       conditions: (() => this.renderConditions()) as any,
     });
 
     mergify.addQueue({
-      name: "default",
+      name: queueName,
+      updateMethod: "merge",
       conditions: (() => this.renderConditions()) as any,
+      // squash all commits into a single commit when merging
+      mergeMethod: "squash",
+      // use PR title+body as the commit message
+      commitMessageTemplate: [
+        "{{ title }} (#{{ number }})",
+        "",
+        "{{ body }}",
+      ].join("\n"),
     });
 
     this.project.addPackageIgnore("/.mergify.yml");

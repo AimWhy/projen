@@ -1,10 +1,10 @@
-import { join } from "path";
+import { join } from "path/posix";
+import { AwsCdkDeps } from "./awscdk-deps";
+import { FEATURE_FLAGS } from "./internal";
 import { IntegrationTestBase, IntegrationTestBaseOptions } from "../cdk";
 import { DependencyType } from "../dependencies";
 import { Project } from "../project";
 import { Task } from "../task";
-import { AwsCdkDeps } from "./awscdk-deps";
-import { FEATURE_FLAGS } from "./internal";
 
 export interface IntegrationTestCommonOptions {
   /**
@@ -74,6 +74,7 @@ export class IntegrationTest extends IntegrationTestBase {
 
     const opts = [
       `--app "${app}"`,
+      "--no-notices",
       "--no-version-reporting",
       // don't inject cloudformation metadata into template
       "--no-asset-metadata",

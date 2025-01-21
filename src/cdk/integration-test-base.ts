@@ -1,8 +1,9 @@
-import { basename, dirname, join } from "path";
+import { basename, dirname } from "path";
+import { join } from "path/posix";
+import { TYPESCRIPT_INTEG_EXT } from "./internal";
 import { Component } from "../component";
 import { Project } from "../project";
 import { Task } from "../task";
-import { TYPESCRIPT_INTEG_EXT } from "./internal";
 
 /**
  * Options for IntegrationTest

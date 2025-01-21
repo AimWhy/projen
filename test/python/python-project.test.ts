@@ -1,4 +1,4 @@
-import { python } from "../../src";
+import { TestPythonProject } from "./util";
 import { synthSnapshot } from "../util";
 
 test("defaults", () => {
@@ -42,6 +42,29 @@ test("pytest maxfailures", () => {
   ).toContain("--maxfail=3");
 });
 
+test("pytest without sample code", () => {
+  const p = new TestPythonProject({
+    pytest: true,
+    sample: false,
+  });
+  const synth = synthSnapshot(p);
+  expect(synth).not.toHaveProperty("tests/__init__.py");
+  expect(synth[".projen/tasks.json"].tasks.test.steps[0].exec).toEqual(
+    "pytest"
+  );
+});
+
+test("pytest with custom testPaths", () => {
+  const p = new TestPythonProject({
+    pytestOptions: {
+      testMatch: ["tests/foo", "tests/bar"],
+    },
+  });
+  expect(
+    synthSnapshot(p)[".projen/tasks.json"].tasks.test.steps[0].exec
+  ).toContain("tests/foo tests/bar");
+});
+
 test("cannot specify multiple projenrc types", () => {
   expect(
     () =>
@@ -50,20 +73,24 @@ test("cannot specify multiple projenrc types", () => {
         projenrcJs: true,
       })
   ).toThrow(
-    /Only one of projenrcPython, projenrcJs, and projenrcJson can be selected./
+    /Only one of projenrcPython, projenrcJs, projenrcTs, and projenrcJson can be selected./
   );
 });
 
-class TestPythonProject extends python.PythonProject {
-  constructor(options: Partial<python.PythonProjectOptions> = {}) {
-    super({
-      ...options,
-      clobber: false,
-      name: "test-python-project",
-      moduleName: "test_python_project",
-      authorName: "First Last",
-      authorEmail: "email@example.com",
-      version: "0.1.0",
-    });
-  }
-}
+test("extras render properly", () => {
+  const p = new TestPythonProject({
+    deps: ["aws-lambda-powertools[tracer]"],
+  });
+  expect(synthSnapshot(p)["requirements.txt"]).toContain(
+    "aws-lambda-powertools[tracer]"
+  );
+});
+
+test("extras render properly with explicit version", () => {
+  const p = new TestPythonProject({
+    deps: ["aws-lambda-powertools[tracer]@1.0.0"],
+  });
+  expect(synthSnapshot(p)["requirements.txt"]).toContain(
+    "aws-lambda-powertools[tracer]==1.0.0"
+  );
+});

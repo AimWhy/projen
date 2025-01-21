@@ -1,8 +1,8 @@
-import { join } from "path";
+import * as path from "path";
 import * as glob from "glob";
+import { TYPESCRIPT_INTEG_EXT } from "./internal";
 import { Component } from "../component";
 import { Project } from "../project";
-import { TYPESCRIPT_INTEG_EXT } from "./internal";
 
 /**
  * Options for `AutoDiscoverBase`
@@ -36,11 +36,11 @@ export abstract class AutoDiscoverBase extends Component {
   constructor(project: Project, options: AutoDiscoverBaseOptions) {
     super(project);
 
-    const cwd = join(this.project.outdir, options.projectdir);
+    const cwd = path.posix.join(this.project.outdir, options.projectdir);
 
     this.entrypoints = glob
       .sync(`**/*${options.extension}`, { cwd })
-      .map((p) => join(options.projectdir, p));
+      .map((p) => path.posix.join(options.projectdir, p));
   }
 }
 

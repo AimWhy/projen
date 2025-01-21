@@ -1,10 +1,18 @@
+import { rmSync } from "fs";
 import * as path from "path";
-import { removeSync } from "fs-extra";
+import { IConstruct } from "constructs";
 import { resolve } from "./_resolve";
-import { PROJEN_MARKER, PROJEN_RC } from "./common";
+import { PROJEN_MARKER, DEFAULT_PROJEN_RC_JS_FILENAME } from "./common";
 import { Component } from "./component";
-import { Project } from "./project";
-import { isExecutable, isWritable, tryReadFileSync, writeFile } from "./util";
+import { ProjenrcFile } from "./projenrc";
+import {
+  assertExecutablePermissions,
+  isWritable,
+  normalizePersistedPath,
+  tryReadFileSync,
+  writeFile,
+} from "./util";
+import { findClosestProject } from "./util/constructs";
 
 export interface FileBaseOptions {
   /**
@@ -46,7 +54,7 @@ export interface FileBaseOptions {
 
 export abstract class FileBase extends Component {
   /**
-   * The file path, relative to the project root.
+   * The file path, relative to the project's outdir.
    */
   public readonly path: string;
 
@@ -61,55 +69,64 @@ export abstract class FileBase extends Component {
   public executable: boolean;
 
   /**
-   * The projen marker, used to identify files as projen-generated.
-   *
-   * Value is undefined if the project is being ejected.
-   */
-  public readonly marker: string | undefined;
-
-  /**
    * The absolute path of this file.
    */
   public readonly absolutePath: string;
 
   private _changed?: boolean;
+  private shouldAddMarker: boolean;
+
+  /**
+   * The projen marker, used to identify files as projen-generated.
+   *
+   * Value is undefined if the project is being ejected.
+   */
+  public get marker(): string | undefined {
+    if (this.project.ejected || !this.shouldAddMarker) {
+      return undefined;
+    }
+
+    // `marker` is empty if project is being ejected or if explicitly disabled
+    const projenrc =
+      ProjenrcFile.of(this.project)?.filePath ?? DEFAULT_PROJEN_RC_JS_FILENAME;
+    return `${PROJEN_MARKER}. To modify, edit ${projenrc} and run "${this.project.projenCommand}".`;
+  }
 
   constructor(
-    project: Project,
+    scope: IConstruct,
     filePath: string,
     options: FileBaseOptions = {}
   ) {
-    super(project);
+    const project = findClosestProject(scope);
+    const root = project.root;
+    const normalizedPath = path.normalize(filePath);
+    const projectPath = normalizePersistedPath(normalizedPath);
+    const absolutePath = path.resolve(project.outdir, projectPath);
+    const relativeProjectPath = path.relative(root.outdir, absolutePath);
+    const rootProjectPath = normalizePersistedPath(relativeProjectPath);
+    const autoId = `${new.target.name}@${projectPath}`;
+
+    // Before actually creating the file, ensure the file path is unique within the full project tree
+    // This is required because projects can create files inside their subprojects
+    if (root.tryFindFile(absolutePath) || scope.node.tryFindChild(autoId)) {
+      throw new Error(`There is already a file under ${rootProjectPath}`);
+    }
+
+    super(scope, autoId);
+    this.node.addMetadata("type", "file");
+    this.node.addMetadata("path", rootProjectPath);
 
     this.readonly = !project.ejected && (options.readonly ?? true);
     this.executable = options.executable ?? false;
-    this.path = filePath;
-
-    // `marker` is empty if project is being ejected or if explicitly disabled
-    this.marker =
-      project.ejected || options.marker === false
-        ? undefined
-        : `${PROJEN_MARKER}. To modify, edit ${PROJEN_RC} and run "npx projen".`;
+    this.path = projectPath;
+    this.absolutePath = absolutePath;
+    this.shouldAddMarker = options.marker ?? true;
 
     const globPattern = `/${this.path}`;
     const committed = options.committed ?? project.commitGenerated ?? true;
     if (committed && filePath !== ".gitattributes") {
-      project.root.annotateGenerated(`/${filePath}`);
+      project.annotateGenerated(`/${filePath}`);
     }
-
-    this.absolutePath = path.resolve(project.outdir, filePath);
-
-    // verify file path is unique within project tree
-    const existing = project.root.tryFindFile(this.absolutePath);
-    if (existing && existing !== this) {
-      throw new Error(
-        `there is already a file under ${path.relative(
-          project.root.outdir,
-          this.absolutePath
-        )}`
-      );
-    }
-
     const editGitignore = options.editGitignore ?? true;
     if (editGitignore) {
       this.project.addGitIgnore(`${committed ? "!" : ""}${globPattern}`);
@@ -143,19 +160,22 @@ export abstract class FileBase extends Component {
     const content = this.synthesizeContent(resolver);
     if (content === undefined) {
       // remove file (if exists) and skip rest of synthesis
-      removeSync(filePath);
+      rmSync(filePath, { force: true, recursive: true });
       return;
     }
 
     // check if the file was changed.
     const prev = tryReadFileSync(filePath);
     const prevReadonly = !isWritable(filePath);
-    const prevExecutable = isExecutable(filePath);
+    const successfulExecutableAssertion = assertExecutablePermissions(
+      filePath,
+      this.executable
+    );
     if (
       prev !== undefined &&
       content === prev &&
       prevReadonly === this.readonly &&
-      prevExecutable === this.executable
+      successfulExecutableAssertion
     ) {
       this.project.logger.debug(`no change in ${filePath}`);
       this._changed = false;

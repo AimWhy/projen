@@ -1,6 +1,6 @@
 import * as path from "path";
-import { JsonFile, Project, Testing, TextFile } from "../src";
 import { synthSnapshot, TestProject } from "./util";
+import { JsonFile, Project, Testing, TextFile } from "../src";
 
 test("file paths are relative to the project outdir", () => {
   // GIVEN
@@ -30,7 +30,7 @@ test("all files added to the project can be enumerated", () => {
   exp("your/file/me.json");
 });
 
-test("generated files are commited if commitGenerated is undefined", () => {
+test("generated files are committed if commitGenerated is undefined", () => {
   // GIVEN
   const p = new TestProject();
   new TextFile(p, "my.txt");
@@ -42,7 +42,7 @@ test("generated files are commited if commitGenerated is undefined", () => {
   expect(gitIgnoreContents).toMatchSnapshot();
 });
 
-test("generated files are commited if commitGenerated is true", () => {
+test("generated files are committed if commitGenerated is true", () => {
   // GIVEN
   const p = new TestProject({ commitGenerated: true });
   new TextFile(p, "my.txt");
@@ -54,7 +54,7 @@ test("generated files are commited if commitGenerated is true", () => {
   expect(gitIgnoreContents).toMatchSnapshot();
 });
 
-test.only("generated files are ignored from git if commitGenerated is false", () => {
+test("generated files are ignored from git if commitGenerated is false", () => {
   // GIVEN
   const p = new TestProject({ commitGenerated: false });
   new TextFile(p, "my.txt");
@@ -64,6 +64,23 @@ test.only("generated files are ignored from git if commitGenerated is false", ()
 
   // THEN
   expect(gitIgnoreContents).toMatchSnapshot();
+});
+
+test("specified gitIgnore patterns are ignored (via gitIgnoreOptions)", () => {
+  // GIVEN
+  const p = new TestProject({
+    gitIgnoreOptions: {
+      ignorePatterns: [".jsii", "foo/"],
+    },
+  });
+
+  // WHEN
+  const gitIgnoreContents = synthSnapshot(p)[".gitignore"];
+
+  // THEN
+  expect(gitIgnoreContents).toMatchSnapshot();
+  expect(gitIgnoreContents).toContain(".jsii");
+  expect(gitIgnoreContents).toContain("foo/");
 });
 
 test("tryFindFile() can be used to find a file either absolute or relative path", () => {
@@ -189,20 +206,4 @@ test("github: false disables github integration", () => {
 
   // THEN
   expect(p.github).toBeUndefined();
-});
-
-test("renovatebot: true creates renovatebot configuration", () => {
-  // GIVEN
-  const p = new TestProject({
-    renovatebot: true,
-    renovatebotOptions: {
-      labels: ["renotate", "dependencies"],
-    },
-  });
-
-  // WHEN
-  const snapshot = synthSnapshot(p);
-
-  // THEN
-  expect(snapshot["renovate.json5"]).toMatchSnapshot();
 });

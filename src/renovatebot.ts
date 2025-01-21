@@ -1,4 +1,5 @@
 import { Component } from "./component";
+import { DependencyType } from "./dependencies";
 import { JsonFile } from "./json";
 import { Project } from "./project";
 
@@ -43,6 +44,10 @@ export interface RenovatebotOptions {
    * List of labels to apply to the created PR's.
    */
   readonly labels?: string[];
+
+  readonly overrideConfig?: any;
+
+  readonly marker?: boolean;
 }
 
 /**
@@ -99,6 +104,11 @@ export enum RenovatebotScheduleInterval {
  * Ignores the versions controlled by Projen.
  */
 export class Renovatebot extends Component {
+  /**
+   * The file holding the renovatebot configuration
+   */
+  public readonly file: JsonFile;
+
   private readonly _project: Project;
 
   private readonly explicitIgnores: string[];
@@ -106,6 +116,10 @@ export class Renovatebot extends Component {
   private readonly scheduleInterval: string[];
 
   private readonly labels?: string[];
+
+  private readonly marker?: boolean;
+
+  private readonly overrideConfig?: any;
 
   constructor(project: Project, options: RenovatebotOptions = {}) {
     super(project);
@@ -117,29 +131,32 @@ export class Renovatebot extends Component {
       RenovatebotScheduleInterval.ANY_TIME,
     ];
     (options.ignoreProjen ?? true) && this.explicitIgnores.push("projen");
-  }
+    this.overrideConfig = options.overrideConfig ?? {};
+    this.marker = options.marker ?? true;
 
-  // create actual file only here, so we know that all dependencies are added to the project
-  public preSynthesize() {
-    this.createRenovateConfiguration();
+    this.file = new JsonFile(this._project, "renovate.json5", {
+      obj: () => this.createRenovateConfiguration(),
+      committed: true,
+      marker: this.marker,
+    });
   }
 
   private createRenovateConfiguration() {
     const renovateIgnore = [
       ...new Set(
         this._project.deps.all
-          .filter((dep) => dep.version)
+          .filter((dep) => dep.version || dep.type === DependencyType.OVERRIDE)
           .map((dep) => dep.name)
           .concat(this.explicitIgnores)
       ),
     ];
 
-    const config = {
+    return {
       labels: this.labels,
       schedule: this.scheduleInterval,
       extends: [
         ":preserveSemverRanges",
-        "config:base",
+        "config:recommended",
         "group:allNonMajor",
         "group:recommended",
         "group:monorepos",
@@ -152,11 +169,7 @@ export class Renovatebot extends Component {
         },
       ],
       ignoreDeps: renovateIgnore,
+      ...this.overrideConfig,
     };
-
-    new JsonFile(this._project, "renovate.json5", {
-      obj: config,
-      committed: true,
-    });
   }
 }

@@ -1,6 +1,5 @@
+import * as fs from "fs";
 import * as path from "path";
-import * as fs from "fs-extra";
-import { existsSync, readFileSync } from "fs-extra";
 import * as glob from "glob";
 import { PROJEN_DIR, PROJEN_MARKER } from "./common";
 import * as logging from "./logging";
@@ -17,14 +16,14 @@ export function cleanup(dir: string, newFiles: string[], exclude: string[]) {
       // Remove all files managed by projen with legacy logic
       removeFiles(findGeneratedFiles(dir, exclude));
     }
-  } catch (e) {
+  } catch (e: any) {
     logging.warn(`warning: failed to clean up generated files: ${e.stack}`);
   }
 }
 
 function removeFiles(files: string[]) {
   for (const file of files) {
-    fs.removeSync(file);
+    fs.rmSync(file, { force: true, recursive: true });
   }
 }
 
@@ -70,13 +69,15 @@ function findOrphanedFiles(
 function getFilesFromManifest(dir: string): string[] {
   try {
     const fileManifestPath = path.resolve(dir, FILE_MANIFEST);
-    if (existsSync(fileManifestPath)) {
-      const fileManifest = JSON.parse(readFileSync(fileManifestPath, "utf-8"));
+    if (fs.existsSync(fileManifestPath)) {
+      const fileManifest = JSON.parse(
+        fs.readFileSync(fileManifestPath, "utf-8")
+      );
       if (fileManifest.files) {
         return fileManifest.files;
       }
     }
-  } catch (e) {
+  } catch (e: any) {
     logging.warn(
       `warning: unable to get files to clean from file manifest: ${e.stack}`
     );
@@ -87,7 +88,7 @@ function getFilesFromManifest(dir: string): string[] {
 
 function readGitIgnore(dir: string) {
   const filepath = path.join(dir, ".gitignore");
-  if (!fs.pathExistsSync(filepath)) {
+  if (!fs.existsSync(filepath)) {
     return [];
   }
 

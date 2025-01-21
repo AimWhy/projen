@@ -1,0 +1,480 @@
+{
+  "//": "Experimental. Expect frequent changes to the structure of this file.",
+  "JsiiProject#projen@<root>": {
+    "metadata": {
+      "type": "project",
+      "construct": "JsiiProject"
+    },
+    "nodes": {
+      "GitAttributesFile@.gitattributes": {
+        "metadata": {
+          "type": "file",
+          "construct": "GitAttributesFile",
+          "path": ".gitattributes"
+        }
+      },
+      "IgnoreFile@.gitignore": {
+        "metadata": {
+          "type": "file",
+          "construct": "IgnoreFile",
+          "path": ".gitignore"
+        }
+      },
+      "Tasks#AutoId1": {
+        "metadata": {
+          "type": "component",
+          "construct": "Tasks"
+        }
+      },
+      "JsonFile@.projen--tasks.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".projen/tasks.json"
+        }
+      },
+      "ProjectBuild#AutoId2": {
+        "metadata": {
+          "type": "component",
+          "construct": "ProjectBuild"
+        }
+      },
+      "Dependencies#AutoId3": {
+        "metadata": {
+          "type": "component",
+          "construct": "Dependencies"
+        }
+      },
+      "JsonFile@.projen--deps.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".projen/deps.json"
+        }
+      },
+      "Logger#projen": {
+        "metadata": {
+          "type": "component",
+          "construct": "Logger"
+        }
+      },
+      "JsonFile@.projen--files.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".projen/files.json"
+        }
+      },
+      "GitHub#AutoId4": {
+        "metadata": {
+          "type": "component",
+          "construct": "GitHub"
+        },
+        "nodes": {
+          "MergeQueue#AutoId1": {
+            "metadata": {
+              "type": "component",
+              "construct": "MergeQueue"
+            },
+            "nodes": {
+              "AutoQueue#AutoId1": {
+                "metadata": {
+                  "type": "component",
+                  "construct": "AutoQueue"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GithubWorkflow#auto-queue": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--auto-queue.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/auto-queue.yml"
+        }
+      },
+      "PullRequestLint#AutoId5": {
+        "metadata": {
+          "type": "component",
+          "construct": "PullRequestLint"
+        }
+      },
+      "GithubWorkflow#pull-request-lint": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--pull-request-lint.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/pull-request-lint.yml"
+        }
+      },
+      "VsCode#AutoId6": {
+        "metadata": {
+          "type": "component",
+          "construct": "VsCode"
+        }
+      },
+      "Gitpod#AutoId7": {
+        "metadata": {
+          "type": "component",
+          "construct": "Gitpod"
+        }
+      },
+      "YamlFile@.gitpod.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".gitpod.yml"
+        }
+      },
+      "DevContainer#AutoId8": {
+        "metadata": {
+          "type": "component",
+          "construct": "DevContainer"
+        }
+      },
+      "JsonFile@.devcontainer.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".devcontainer.json"
+        }
+      },
+      "Clobber#AutoId9": {
+        "metadata": {
+          "type": "component",
+          "construct": "Clobber"
+        }
+      },
+      "SampleReadme#AutoId10": {
+        "metadata": {
+          "type": "component",
+          "construct": "SampleReadme"
+        }
+      },
+      "AutoApprove#AutoId11": {
+        "metadata": {
+          "type": "component",
+          "construct": "AutoApprove"
+        }
+      },
+      "GithubWorkflow#auto-approve": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--auto-approve.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/auto-approve.yml"
+        }
+      },
+      "NodePackage#AutoId12": {
+        "metadata": {
+          "type": "component",
+          "construct": "NodePackage"
+        },
+        "nodes": {
+          "JsonFile@package.json": {
+            "metadata": {
+              "type": "file",
+              "construct": "JsonFile",
+              "path": "package.json"
+            }
+          }
+        }
+      },
+      "License@LICENSE": {
+        "metadata": {
+          "type": "file",
+          "construct": "License",
+          "path": "LICENSE"
+        }
+      },
+      "IgnoreFile@.npmignore": {
+        "metadata": {
+          "type": "file",
+          "construct": "IgnoreFile",
+          "path": ".npmignore"
+        }
+      },
+      "Jest#AutoId13": {
+        "metadata": {
+          "type": "component",
+          "construct": "Jest"
+        }
+      },
+      "BuildWorkflow#AutoId14": {
+        "metadata": {
+          "type": "component",
+          "construct": "BuildWorkflow"
+        }
+      },
+      "GithubWorkflow#build": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--build.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/build.yml"
+        }
+      },
+      "Release#AutoId15": {
+        "metadata": {
+          "type": "component",
+          "construct": "Release"
+        },
+        "nodes": {
+          "TaskWorkflowJob#release": {
+            "metadata": {
+              "type": "component",
+              "construct": "TaskWorkflowJob"
+            }
+          }
+        }
+      },
+      "Version#AutoId16": {
+        "metadata": {
+          "type": "component",
+          "construct": "Version"
+        }
+      },
+      "Publisher#AutoId17": {
+        "metadata": {
+          "type": "component",
+          "construct": "Publisher"
+        }
+      },
+      "GithubWorkflow#release": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--release.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/release.yml"
+        }
+      },
+      "PullRequestTemplate@.github--pull_request_template.md": {
+        "metadata": {
+          "type": "file",
+          "construct": "PullRequestTemplate",
+          "path": ".github/pull_request_template.md"
+        }
+      },
+      "Bundler#AutoId18": {
+        "metadata": {
+          "type": "component",
+          "construct": "Bundler"
+        }
+      },
+      "Prettier#AutoId19": {
+        "metadata": {
+          "type": "component",
+          "construct": "Prettier"
+        }
+      },
+      "IgnoreFile@.prettierignore": {
+        "metadata": {
+          "type": "file",
+          "construct": "IgnoreFile",
+          "path": ".prettierignore"
+        }
+      },
+      "JsonFile@.prettierrc.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".prettierrc.json"
+        }
+      },
+      "LicenseChecker#check-licenses": {
+        "metadata": {
+          "type": "component",
+          "construct": "LicenseChecker"
+        }
+      },
+      "TypescriptConfig#AutoId20": {
+        "metadata": {
+          "type": "component",
+          "construct": "TypescriptConfig"
+        }
+      },
+      "JsonFile@tsconfig.dev.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": "tsconfig.dev.json"
+        }
+      },
+      "Eslint#AutoId21": {
+        "metadata": {
+          "type": "component",
+          "construct": "Eslint"
+        }
+      },
+      "JsonFile@.eslintrc.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".eslintrc.json"
+        }
+      },
+      "Projenrc#AutoId22": {
+        "metadata": {
+          "type": "component",
+          "construct": "Projenrc"
+        }
+      },
+      "SampleCode#AutoId23": {
+        "metadata": {
+          "type": "component",
+          "construct": "SampleCode"
+        }
+      },
+      "SampleDir#AutoId24": {
+        "metadata": {
+          "type": "component",
+          "construct": "SampleDir"
+        }
+      },
+      "SampleDir#AutoId25": {
+        "metadata": {
+          "type": "component",
+          "construct": "SampleDir"
+        }
+      },
+      "JsiiDocgen#AutoId26": {
+        "metadata": {
+          "type": "component",
+          "construct": "JsiiDocgen"
+        }
+      },
+      "TaskWorkflow#check-licenses": {
+        "metadata": {
+          "type": "component",
+          "construct": "TaskWorkflow"
+        },
+        "nodes": {
+          "TaskWorkflowJob#check-licenses": {
+            "metadata": {
+              "type": "component",
+              "construct": "TaskWorkflowJob"
+            }
+          }
+        }
+      },
+      "YamlFile@.github--workflows--check-licenses.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/check-licenses.yml"
+        }
+      },
+      "UpgradeDependencies#AutoId27": {
+        "metadata": {
+          "type": "component",
+          "construct": "UpgradeDependencies"
+        }
+      },
+      "GithubWorkflow#upgrade-bundled-main": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--upgrade-bundled-main.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/upgrade-bundled-main.yml"
+        }
+      },
+      "UpgradeDependencies#AutoId28": {
+        "metadata": {
+          "type": "component",
+          "construct": "UpgradeDependencies"
+        }
+      },
+      "GithubWorkflow#upgrade-main": {
+        "metadata": {
+          "type": "component",
+          "construct": "GithubWorkflow"
+        }
+      },
+      "YamlFile@.github--workflows--upgrade-main.yml": {
+        "metadata": {
+          "type": "file",
+          "construct": "YamlFile",
+          "path": ".github/workflows/upgrade-main.yml"
+        }
+      },
+      "TextFile@projen.js": {
+        "metadata": {
+          "type": "file",
+          "construct": "TextFile",
+          "path": "projen.js"
+        }
+      },
+      "JsonFile@.markdownlint.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".markdownlint.json"
+        }
+      },
+      "VsCodeLaunchConfig#AutoId29": {
+        "metadata": {
+          "type": "component",
+          "construct": "VsCodeLaunchConfig"
+        }
+      },
+      "JsonFile@.vscode--launch.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".vscode/launch.json"
+        }
+      },
+      "WindowsBuild": {
+        "metadata": {
+          "type": "component",
+          "construct": "WindowsBuild"
+        }
+      },
+      "ProjectTree": {
+        "metadata": {
+          "type": "component",
+          "construct": "ProjectTree"
+        }
+      },
+      "JsonFile@.projen--tree.json": {
+        "metadata": {
+          "type": "file",
+          "construct": "JsonFile",
+          "path": ".projen/tree.json"
+        }
+      }
+    }
+  }
+}
