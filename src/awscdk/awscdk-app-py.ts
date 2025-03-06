@@ -6,10 +6,10 @@ import {
   CdkTasks,
 } from ".";
 import { Component, DependencyType, SampleDir, SampleFile } from "..";
-import { Pytest } from "../python/pytest";
-import { PythonProject, PythonProjectOptions } from "../python/python-project";
 import { AwsCdkDepsPy } from "./awscdk-deps-py";
 import { AwsCdkPytestSample } from "./awscdk-pytest-sample";
+import { Pytest } from "../python/pytest";
+import { PythonProject, PythonProjectOptions } from "../python/python-project";
 
 /**
  * Options for `AwsCdkPythonApp`
@@ -29,6 +29,7 @@ export interface AwsCdkPythonAppOptions
    * Python sources directory.
    *
    * @default "tests"
+   * @deprecated Use `sampleTestdir` instead.
    */
   readonly testdir?: string;
 }
@@ -58,8 +59,14 @@ export class AwsCdkPythonApp extends PythonProject {
 
   /**
    * The directory in which the python tests reside.
+   * @deprecated Use `sampleTestdir` instead.
    */
   public readonly testdir: string;
+
+  /**
+   * The directory in which the python sample tests reside.
+   */
+  public readonly sampleTestdir: string;
 
   /**
    * The CDK version this app is using.
@@ -76,7 +83,8 @@ export class AwsCdkPythonApp extends PythonProject {
       ...options,
     });
     this.appEntrypoint = options.appEntrypoint ?? "app.py";
-    this.testdir = options.testdir ?? "tests";
+    this.testdir = this.sampleTestdir =
+      options.sampleTestdir ?? options.testdir ?? "tests";
 
     this.cdkTasks = new CdkTasks(this);
     this.postCompileTask.spawn(this.cdkTasks.synthSilent);
@@ -98,13 +106,13 @@ export class AwsCdkPythonApp extends PythonProject {
     });
 
     if (options.sample ?? true) {
-      new AppCode(this, "app.py", this.cdkDeps.cdkMajorVersion);
+      new AppCode(this, this.appEntrypoint, this.cdkDeps.cdkMajorVersion);
       new MyStackCode(this, this.moduleName, this.cdkDeps.cdkMajorVersion);
     }
 
     if (options.pytest ?? true) {
       this.pytest = new Pytest(this, options.pytestOptions);
-      new AwsCdkPytestSample(this, this.pytest.testdir);
+      new AwsCdkPytestSample(this, this.sampleTestdir);
     }
   }
 }

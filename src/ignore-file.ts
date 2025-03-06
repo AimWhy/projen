@@ -1,11 +1,46 @@
 import { FileBase, IResolver } from "./file";
 import { Project } from "./project";
+import { normalizePersistedPath } from "./util";
+
+export interface IgnoreFileOptions {
+  /**
+   * Filter out comment lines?
+   *
+   * @default true
+   */
+  readonly filterCommentLines?: boolean;
+
+  /**
+   * Filter out blank/empty lines?
+   *
+   * @default true
+   */
+  readonly filterEmptyLines?: boolean;
+
+  /**
+   * Patterns to add to the ignore file
+   *
+   * @default []
+   */
+  readonly ignorePatterns?: string[];
+}
 
 export class IgnoreFile extends FileBase {
-  private readonly _patterns = new Array<string>();
+  private readonly _patterns: string[];
+  public readonly filterCommentLines: boolean;
+  public readonly filterEmptyLines: boolean;
 
-  constructor(project: Project, filePath: string) {
+  /**
+   *
+   * @param project The project to tie this file to.
+   * @param filePath - the relative path in the project to put the file
+   * @param minify - whether comments/blank lines should be filtered
+   */
+  constructor(project: Project, filePath: string, options?: IgnoreFileOptions) {
     super(project, filePath, { editGitignore: filePath !== ".gitignore" });
+    this.filterCommentLines = options?.filterCommentLines ?? true;
+    this.filterEmptyLines = options?.filterEmptyLines ?? true;
+    this._patterns = options?.ignorePatterns ?? [];
   }
 
   /**
@@ -13,20 +48,28 @@ export class IgnoreFile extends FileBase {
    * pattern starts with a negation mark `!`, files that match will _not_ be
    * ignored.
    *
-   * Comment lines (start with `#`) are ignored.
+   * Comment lines (start with `#`) and blank lines ("") are filtered by default
+   * but can be included using options specified when instantiating the component.
    *
    * @param patterns Ignore patterns.
    */
   public addPatterns(...patterns: string[]) {
     for (const pattern of patterns) {
-      // skip comments
-      if (pattern.startsWith("#")) {
+      const isComment = pattern.startsWith("#");
+      const isEmptyLine = Boolean(pattern.trim().length === 0);
+      if (isComment && this.filterCommentLines) {
         continue;
       }
+      if (isEmptyLine && this.filterEmptyLines) {
+        continue;
+      }
+      if (!isComment && !isEmptyLine) {
+        this.normalizePatterns(pattern);
+      }
 
-      this.normalizePatterns(pattern);
+      const normalizedPattern = normalizePersistedPath(pattern);
 
-      this._patterns.push(pattern);
+      this._patterns.push(normalizedPattern);
     }
   }
 

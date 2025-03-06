@@ -1,9 +1,13 @@
 import * as cp from "child_process";
+import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import * as fs from "fs-extra";
 import { Project } from "../src";
-import { GitHubProject, GitHubProjectOptions } from "../src/github";
+import { installPackage } from "../src/cli/util";
+import {
+  GitHubProject,
+  GitHubProjectOptions,
+} from "../src/github/github-project";
 import * as logging from "../src/logging";
 import { Task } from "../src/task";
 import { exec } from "../src/util";
@@ -33,10 +37,30 @@ export class TestProject extends GitHubProject {
   }
 }
 
-export function execProjenCLI(workdir: string, args: string[] = []) {
+interface ProjenCLIExecOptions {
+  preInstallProjen?: boolean;
+}
+
+export function execProjenCLI(
+  workdir: string,
+  args: string[] = [],
+  env?: Record<string, string>,
+  { preInstallProjen = true }: ProjenCLIExecOptions = {}
+) {
   const command = [process.execPath, PROJEN_CLI, ...args];
 
-  return exec(command.map((x) => `"${x}"`).join(" "), { cwd: workdir });
+  // For "projen new" commands we need to pre-install the current library,
+  // to ensure the latest code is used in test cases
+  // https://github.com/projen/projen/issues/3410
+  if (preInstallProjen && args.includes("new")) {
+    installPackage(
+      workdir,
+      `file:${path.normalize(path.join(__dirname, ".."))}`,
+      true
+    );
+  }
+
+  return exec(command.map((x) => `"${x}"`).join(" "), { cwd: workdir, env });
 }
 
 const autoRemove = new Set<string>();
@@ -47,10 +71,8 @@ afterAll((done) => {
   // Array.from used to get a copy, so we can safely remove from the set
   for (const dir of Array.from(autoRemove)) {
     try {
-      // Note - fs-extra.removeSync is idempotent, so we're safe if the
-      // directory has already been cleaned up before we get there!
-      fs.removeSync(dir);
-    } catch (e) {
+      fs.rmSync(dir, { force: true, recursive: true });
+    } catch (e: any) {
       done.fail(e);
     }
     autoRemove.delete(dir);
@@ -58,8 +80,10 @@ afterAll((done) => {
   done();
 });
 
-export function mkdtemp(opts: { cleanup?: boolean } = {}) {
-  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "projen-test-"));
+export function mkdtemp(opts: { cleanup?: boolean; dir?: string } = {}) {
+  const tmpdir = fs.mkdtempSync(
+    path.join(opts.dir ?? os.tmpdir(), "projen-test-")
+  );
   if (opts.cleanup ?? true) {
     autoRemove.add(tmpdir);
   }
@@ -71,16 +95,16 @@ export function synthSnapshotWithPost(project: Project) {
     project.synth();
     return directorySnapshot(project.outdir);
   } finally {
-    fs.removeSync(project.outdir);
+    fs.rmSync(project.outdir, { force: true, recursive: true });
   }
 }
 
 export function withProjectDir(
   code: (workdir: string) => void,
-  options: { git?: boolean; chdir?: boolean } = {}
+  options: { git?: boolean; chdir?: boolean; tmpdir?: string } = {}
 ) {
   const origDir = process.cwd();
-  const outdir = mkdtemp();
+  const outdir = options.tmpdir ?? mkdtemp();
   try {
     // create project under "my-project" so that basedir is deterministic
     const projectdir = path.join(outdir, "my-project");
@@ -113,7 +137,7 @@ export function withProjectDir(
     code(projectdir);
   } finally {
     process.chdir(origDir);
-    fs.removeSync(outdir);
+    fs.rmSync(outdir, { force: true, recursive: true });
   }
 }
 
@@ -123,7 +147,7 @@ export function withProjectDir(
  */
 export function sanitizeOutput(dir: string) {
   const filepath = path.join(dir, "package.json");
-  const pkg = fs.readJsonSync(filepath);
+  const pkg = JSON.parse(fs.readFileSync(filepath, "utf-8"));
   const prev = pkg.devDependencies.projen;
   if (!prev) {
     throw new Error(
@@ -131,26 +155,25 @@ export function sanitizeOutput(dir: string) {
     );
   }
 
-  // replace the current projen version with 999.999.999 for deterministic output.
-  // this will preserve any semantic version requirements (e.g. "^", "~", etc).
-  pkg.devDependencies.projen = prev.replace(/\d+\.\d+\.\d+/, "999.999.999");
-  fs.writeJsonSync(filepath, pkg);
+  // replace the current projen version with * for deterministic output.
+  pkg.devDependencies.projen = "*";
+  fs.writeFileSync(filepath, JSON.stringify(pkg));
 
-  // we will also patch deps.json so that all projen deps will be set to 999.999.999
+  // we will also patch deps.json so that all projen deps will be set to *
   const depsPath = path.join(dir, ".projen", "deps.json");
-  const deps = fs.readJsonSync(depsPath);
+  const deps = JSON.parse(fs.readFileSync(depsPath, "utf-8"));
   for (const dep of deps.dependencies) {
     if (dep.name === "projen" && dep.version) {
-      dep.version = dep.version.replace(/\d+\.\d+\.\d+/, "999.999.999");
+      dep.version = "*";
     }
   }
   fs.chmodSync(depsPath, "777");
-  fs.writeJsonSync(depsPath, deps);
+  fs.writeFileSync(depsPath, JSON.stringify(deps));
 }
 
 export {
-  synthSnapshot,
-  directorySnapshot,
-  SynthOutput,
   DirectorySnapshotOptions,
+  SynthOutput,
+  directorySnapshot,
+  synthSnapshot,
 } from "../src/util/synth";

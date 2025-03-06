@@ -1,12 +1,37 @@
+import { extname } from "node:path";
 import { snake } from "case";
-import { resolve } from "../_resolve";
-import { Component } from "../component";
-import { kebabCaseKeys } from "../util";
-import { YamlFile } from "../yaml";
+import { GitHubActionsProvider } from "./actions-provider";
 import { GitHub } from "./github";
 import { GithubCredentials } from "./github-credentials";
-
 import * as workflows from "./workflows-model";
+import { resolve } from "../_resolve";
+import { Component } from "../component";
+import { deepMerge, kebabCaseKeys } from "../util";
+import { YamlFile } from "../yaml";
+
+/**
+ * Options for `concurrency`.
+ */
+export interface ConcurrencyOptions {
+  /**
+   * Concurrency group controls which workflow runs will share the same concurrency limit.
+   * For example, if you specify `${{ github.workflow }}-${{ github.ref }}`, workflow runs triggered
+   * on the same branch cannot run concurrenty, but workflows runs triggered on different branches can.
+   *
+   * @default - ${{ github.workflow }}
+   *
+   * @see https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-concurrency#example-concurrency-groups
+   */
+  readonly group?: string;
+
+  /**
+   * When a workflow is triggered while another one (in the same group) is running, should GitHub cancel
+   * the running workflow?
+   *
+   * @default false
+   */
+  readonly cancelInProgress?: boolean;
+}
 
 /**
  * Options for `GithubWorkflow`.
@@ -18,13 +43,34 @@ export interface GithubWorkflowOptions {
    * @default false
    */
   readonly force?: boolean;
+
+  /**
+   * Enable concurrency limitations. Use `concurrencyOptions` to configure specific non default values.
+   *
+   * @default false
+   */
+  readonly limitConcurrency?: boolean;
+
   /**
    * Concurrency ensures that only a single job or workflow using the same concurrency group will run at a time. Currently in beta.
    *
-   * @default - disabled
+   * @default - { group: ${{ github.workflow }}, cancelInProgress: false }
+   *
    * @see https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#concurrency
    */
-  readonly concurrency?: string;
+  readonly concurrencyOptions?: ConcurrencyOptions;
+
+  /**
+   * Set a custom file name for the workflow definition file. Must include either a .yml or .yaml file extension.
+   *
+   * Use this option to set a file name for the workflow file, that is different than the display name.
+   *
+   * @example "build-new.yml"
+   * @example "my-workflow.yaml"
+   *
+   * @default - a path-safe version of the workflow name plus the .yml file ending, e.g. build.yml
+   */
+  readonly fileName?: string;
 }
 
 /**
@@ -36,17 +82,16 @@ export interface GithubWorkflowOptions {
  */
 export class GithubWorkflow extends Component {
   /**
-   * The name of the workflow.
+   * The name of the workflow. GitHub displays the names of your workflows under your repository's
+   * "Actions" tab.
+   * @see https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#name
    */
   public readonly name: string;
 
   /**
-   * Concurrency ensures that only a single job or workflow using the same concurrency group will run at a time.
-   *
-   * @default disabled
-   * @experimental
+   * The concurrency configuration of the workflow. undefined means no concurrency limitations.
    */
-  public readonly concurrency?: string;
+  public readonly concurrency?: ConcurrencyOptions;
 
   /**
    * The workflow YAML file. May not exist if `workflowsEnabled` is false on `GitHub`.
@@ -58,35 +103,70 @@ export class GithubWorkflow extends Component {
    */
   public readonly projenCredentials: GithubCredentials;
 
+  /**
+   * The name for workflow runs generated from the workflow. GitHub displays the
+   * workflow run name in the list of workflow runs on your repository's
+   * "Actions" tab. If `run-name` is omitted or is only whitespace, then the run
+   * name is set to event-specific information for the workflow run. For
+   * example, for a workflow triggered by a `push` or `pull_request` event, it
+   * is set as the commit message.
+   *
+   * This value can include expressions and can reference `github` and `inputs`
+   * contexts.
+   */
+  public runName?: string;
+
+  private actions: GitHubActionsProvider;
   private events: workflows.Triggers = {};
   private jobs: Record<
     string,
     workflows.Job | workflows.JobCallingReusableWorkflow
   > = {};
 
+  /**
+   * @param github The GitHub component of the project this workflow belongs to.
+   * @param name The name of the workflow, displayed under the repository's "Actions" tab.
+   * @param options Additional options to configure the workflow.
+   */
   constructor(
     github: GitHub,
     name: string,
     options: GithubWorkflowOptions = {}
   ) {
-    super(github.project);
+    super(github.project, `${new.target.name}#${name}`);
+
+    const defaultConcurrency: ConcurrencyOptions = {
+      cancelInProgress: false,
+      group: "${{ github.workflow }}",
+    };
 
     this.name = name;
-    this.concurrency = options.concurrency;
+    this.concurrency = options.limitConcurrency
+      ? (deepMerge([
+          defaultConcurrency,
+          options.concurrencyOptions,
+        ]) as ConcurrencyOptions)
+      : undefined;
     this.projenCredentials = github.projenCredentials;
+    this.actions = github.actions;
 
     const workflowsEnabled = github.workflowsEnabled || options.force;
 
     if (workflowsEnabled) {
-      this.file = new YamlFile(
-        this.project,
-        `.github/workflows/${name.toLocaleLowerCase()}.yml`,
-        {
-          obj: () => this.renderWorkflow(),
-          // GitHub needs to read the file from the repository in order to work.
-          committed: true,
-        }
-      );
+      const fileName = options.fileName ?? `${name.toLocaleLowerCase()}.yml`;
+      const extension = extname(fileName).toLowerCase();
+
+      if (![".yml", ".yaml"].includes(extension)) {
+        throw new Error(
+          `GitHub Workflow files must have either a .yml or .yaml file extension, got: ${fileName}`
+        );
+      }
+
+      this.file = new YamlFile(this.project, `.github/workflows/${fileName}`, {
+        obj: () => this.renderWorkflow(),
+        // GitHub needs to read the file from the repository in order to work.
+        committed: true,
+      });
     }
   }
 
@@ -122,26 +202,7 @@ export class GithubWorkflow extends Component {
   public addJobs(
     jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
   ) {
-    // verify that job has a "permissions" statement to ensure workflow can
-    // operate in repos with default tokens set to readonly
-    for (const [id, job] of Object.entries(jobs)) {
-      if (!job.permissions) {
-        throw new Error(
-          `${id}: all workflow jobs must have a "permissions" clause to ensure workflow can operate in restricted repositories`
-        );
-      }
-    }
-
-    // verify that job has a "runsOn" statement to ensure a worker can be selected appropriately
-    for (const [id, job] of Object.entries(jobs)) {
-      if (!("uses" in job)) {
-        if ("runsOn" in job && job.runsOn.length === 0) {
-          throw new Error(
-            `${id}: at least one runner selector labels must be provided in "runsOn" to ensure a runner instance can be selected`
-          );
-        }
-      }
-    }
+    verifyJobConstraints(jobs);
 
     this.jobs = {
       ...this.jobs,
@@ -149,12 +210,75 @@ export class GithubWorkflow extends Component {
     };
   }
 
+  /**
+   * Get a single job from the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public getJob(
+    id: string
+  ): workflows.Job | workflows.JobCallingReusableWorkflow {
+    return this.jobs[id];
+  }
+
+  /**
+   * Updates a single job to the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public updateJob(
+    id: string,
+    job: workflows.Job | workflows.JobCallingReusableWorkflow
+  ) {
+    this.updateJobs({ [id]: job });
+  }
+
+  /**
+   * Updates jobs for this worklow
+   * Does a complete replace, it does not try to merge the jobs
+   *
+   * @param jobs Jobs to update.
+   */
+  public updateJobs(
+    jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+  ) {
+    verifyJobConstraints(jobs);
+
+    const newJobIds = Object.keys(jobs);
+    const updatedJobs = Object.entries(this.jobs).map(([jobId, job]) => {
+      if (newJobIds.includes(jobId)) {
+        return [jobId, jobs[jobId]];
+      }
+      return [jobId, job];
+    });
+    this.jobs = {
+      ...Object.fromEntries(updatedJobs),
+    };
+  }
+
+  /**
+   * Removes a single job to the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public removeJob(id: string) {
+    const updatedJobs = Object.entries(this.jobs).filter(
+      ([jobId]) => jobId !== id
+    );
+    this.jobs = {
+      ...Object.fromEntries(updatedJobs),
+    };
+  }
+
   private renderWorkflow() {
     return {
       name: this.name,
+      "run-name": this.runName,
       on: snakeCaseKeys(this.events),
-      concurrency: this.concurrency,
-      jobs: renderJobs(this.jobs),
+      concurrency: this.concurrency
+        ? {
+            group: this.concurrency?.group,
+            "cancel-in-progress": this.concurrency.cancelInProgress,
+          }
+        : undefined,
+      jobs: renderJobs(this.jobs, this.actions),
     };
   }
 }
@@ -179,7 +303,8 @@ function snakeCaseKeys<T = unknown>(obj: T): T {
 }
 
 function renderJobs(
-  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>,
+  actions: GitHubActionsProvider
 ) {
   const result: Record<string, unknown> = {};
   for (const [name, job] of Object.entries(jobs)) {
@@ -204,6 +329,7 @@ function renderJobs(
         uses: job.uses,
         with: job.with,
         secrets: job.secrets,
+        strategy: renderJobStrategy(job.strategy),
       };
     }
 
@@ -217,7 +343,7 @@ function renderJobs(
     return {
       name: job.name,
       needs: arrayOrScalar(job.needs),
-      "runs-on": arrayOrScalar(job.runsOn),
+      "runs-on": arrayOrScalar(job.runsOnGroup) ?? arrayOrScalar(job.runsOn),
       permissions: kebabCaseKeys(job.permissions),
       environment: job.environment,
       concurrency: job.concurrency,
@@ -225,7 +351,7 @@ function renderJobs(
       env: job.env,
       defaults: kebabCaseKeys(job.defaults),
       if: job.if,
-      steps: steps,
+      steps: steps.map(renderStep),
       "timeout-minutes": job.timeoutMinutes,
       strategy: renderJobStrategy(job.strategy),
       "continue-on-error": job.continueOnError,
@@ -275,9 +401,27 @@ function renderJobs(
 
     return rendered;
   }
+
+  function renderStep(step: workflows.JobStep) {
+    return {
+      name: step.name,
+      id: step.id,
+      if: step.if,
+      uses: step.uses && actions.get(step.uses),
+      env: step.env,
+      run: step.run,
+      with: step.with,
+      "continue-on-error": step.continueOnError,
+      "timeout-minutes": step.timeoutMinutes,
+      "working-directory": step.workingDirectory,
+    };
+  }
 }
 
-function arrayOrScalar<T>(arr: T[] | undefined): T | T[] | undefined {
+function arrayOrScalar<T>(arr: T | T[] | undefined): T | T[] | undefined {
+  if (!Array.isArray(arr)) {
+    return arr;
+  }
   if (arr == null || arr.length === 0) {
     return arr;
   }
@@ -287,50 +431,57 @@ function arrayOrScalar<T>(arr: T[] | undefined): T | T[] | undefined {
   return arr;
 }
 
-export interface IJobProvider {
-  /**
-   * Generates a collection of named GitHub workflow jobs.
-   */
-  renderJobs(): Record<string, workflows.Job>;
-}
-
 function setupTools(tools: workflows.Tools) {
   const steps: workflows.JobStep[] = [];
 
   if (tools.java) {
     steps.push({
-      uses: "actions/setup-java@v3",
-      with: { distribution: "temurin", "java-version": tools.java.version },
+      uses: "actions/setup-java@v4",
+      with: { distribution: "corretto", "java-version": tools.java.version },
     });
   }
 
   if (tools.node) {
     steps.push({
-      uses: "actions/setup-node@v3",
+      uses: "actions/setup-node@v4",
       with: { "node-version": tools.node.version },
     });
   }
 
   if (tools.python) {
     steps.push({
-      uses: "actions/setup-python@v3",
+      uses: "actions/setup-python@v5",
       with: { "python-version": tools.python.version },
     });
   }
 
   if (tools.go) {
     steps.push({
-      uses: "actions/setup-go@v3",
+      uses: "actions/setup-go@v5",
       with: { "go-version": tools.go.version },
     });
   }
 
   if (tools.dotnet) {
     steps.push({
-      uses: "actions/setup-dotnet@v2",
+      uses: "actions/setup-dotnet@v4",
       with: { "dotnet-version": tools.dotnet.version },
     });
   }
 
   return steps;
+}
+
+function verifyJobConstraints(
+  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+) {
+  // verify that job has a "permissions" statement to ensure workflow can
+  // operate in repos with default tokens set to readonly
+  for (const [id, job] of Object.entries(jobs)) {
+    if (!job.permissions) {
+      throw new Error(
+        `${id}: all workflow jobs must have a "permissions" clause to ensure workflow can operate in restricted repositories`
+      );
+    }
+  }
 }

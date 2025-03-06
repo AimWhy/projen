@@ -1,16 +1,49 @@
 import * as path from "path";
-import { Component } from "../component";
-import { GitHub, GitHubProject, GithubWorkflow, TaskWorkflow } from "../github";
-import { BUILD_ARTIFACT_NAME } from "../github/constants";
-import { Job, JobPermission, JobStep } from "../github/workflows-model";
-import { Task } from "../task";
-import { Version } from "../version";
+import { IConstruct } from "constructs";
 import { Publisher } from "./publisher";
 import { ReleaseTrigger } from "./release-trigger";
+import { DEFAULT_ARTIFACTS_DIRECTORY } from "../build/private/consts";
+import { Component } from "../component";
+import {
+  GitHub,
+  GithubWorkflow,
+  TaskWorkflowJob,
+  WorkflowSteps,
+} from "../github";
+import {
+  BUILD_ARTIFACT_NAME,
+  PERMISSION_BACKUP_FILE,
+} from "../github/constants";
+import { ensureNotHiddenPath } from "../github/private/util";
+import {
+  Job,
+  JobPermission,
+  JobPermissions,
+  JobStep,
+} from "../github/workflows-model";
+import { Project } from "../project";
+import {
+  GroupRunnerOptions,
+  filteredRunsOnOptions,
+  filteredWorkflowRunsOnOptions,
+} from "../runner-options";
+import { Task } from "../task";
+import { normalizePersistedPath } from "../util";
+import { workflowNameForProject } from "../util/name";
+import { ensureRelativePathStartsWithDot } from "../util/path";
+import { ReleasableCommits, Version } from "../version";
 
 const BUILD_JOBID = "release";
 const GIT_REMOTE_STEPID = "git_remote";
+const TAG_EXISTS_STEPID = "check_tag_exists";
+
 const LATEST_COMMIT_OUTPUT = "latest_commit";
+const TAG_EXISTS_OUTPUT = "tag_exists";
+
+/**
+ * Conditional (Github Workflow Job `if`) to check if a release job should be run.
+ */
+const DEPENDENT_JOB_CONDITIONAL = `needs.${BUILD_JOBID}.outputs.${TAG_EXISTS_OUTPUT} != 'true' && needs.${BUILD_JOBID}.outputs.${LATEST_COMMIT_OUTPUT} == github.sha`;
 
 type BranchHook = (branch: string) => void;
 
@@ -112,7 +145,7 @@ export interface ReleaseProjectOptions {
   /**
    * The name of the default release workflow.
    *
-   * @default "Release"
+   * @default "release"
    */
   readonly releaseWorkflowName?: string;
 
@@ -154,12 +187,12 @@ export interface ReleaseProjectOptions {
    * history, you may need to manually tag your latest release
    * with the new prefix.
    *
-   * @default - no prefix
+   * @default "v"
    */
   readonly releaseTagPrefix?: string;
 
   /**
-   * Custom configuration used when creating changelog with standard-version package.
+   * Custom configuration used when creating changelog with commit-and-tag-version package.
    * Given values either append to default configuration or overwrite values in it.
    *
    * @default - standard configuration applicable for GitHub repositories
@@ -169,8 +202,17 @@ export interface ReleaseProjectOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly workflowRunsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly workflowRunsOnGroup?: GroupRunnerOptions;
 
   /**
    * Define publishing tasks that can be executed manually as well as workflows.
@@ -188,6 +230,48 @@ export interface ReleaseProjectOptions {
    * @default false
    */
   readonly publishDryRun?: boolean;
+
+  /**
+   * Find commits that should be considered releasable
+   * Used to decide if a release is required.
+   *
+   * @default ReleasableCommits.everyCommit()
+   */
+  readonly releasableCommits?: ReleasableCommits;
+
+  /**
+   * The `commit-and-tag-version` compatible package used to bump the package version, as a dependency string.
+   *
+   * This can be any compatible package version, including the deprecated `standard-version@9`.
+   *
+   * @default - A recent version of "commit-and-tag-version"
+   */
+  readonly bumpPackage?: string;
+
+  /**
+   * A shell command to control the next version to release.
+   *
+   * If present, this shell command will be run before the bump is executed, and
+   * it determines what version to release. It will be executed in the following
+   * environment:
+   *
+   * - Working directory: the project directory.
+   * - `$VERSION`: the current version. Looks like `1.2.3`.
+   * - `$LATEST_TAG`: the most recent tag. Looks like `prefix-v1.2.3`, or may be unset.
+   *
+   * The command should print one of the following to `stdout`:
+   *
+   * - Nothing: the next version number will be determined based on commit history.
+   * - `x.y.z`: the next version number will be `x.y.z`.
+   * - `major|minor|patch`: the next version number will be the current version number
+   *   with the indicated component bumped.
+   *
+   * This setting cannot be specified together with `minMajorVersion`; the invoked
+   * script can be used to achieve the effects of `minMajorVersion`.
+   *
+   * @default - The next version will be determined based on the commit history and project settings.
+   */
+  readonly nextVersionCommand?: string;
 }
 
 /**
@@ -231,6 +315,21 @@ export interface ReleaseOptions extends ReleaseProjectOptions {
    * @default "dist"
    */
   readonly artifactsDirectory: string;
+
+  /**
+   * Node version to setup in GitHub workflows if any node-based CLI utilities
+   * are needed. For example `publib`, the CLI projen uses to publish releases,
+   * is an npm library.
+   *
+   * @default "lts/*""
+   */
+  readonly workflowNodeVersion?: string;
+
+  /**
+   * Permissions granted to the release workflow job
+   * @default `{ contents: JobPermission.WRITE }`
+   */
+  readonly workflowPermissions?: JobPermissions;
 }
 
 /**
@@ -241,11 +340,12 @@ export interface ReleaseOptions extends ReleaseProjectOptions {
 export class Release extends Component {
   public static readonly ANTI_TAMPER_CMD =
     "git diff --ignore-space-at-eol --exit-code";
+
   /**
    * Returns the `Release` component of a project or `undefined` if the project
    * does not have a Release component.
    */
-  public static of(project: GitHubProject): Release | undefined {
+  public static of(project: Project): Release | undefined {
     const isRelease = (c: Component): c is Release => c instanceof Release;
     return project.components.find(isRelease);
   }
@@ -254,6 +354,11 @@ export class Release extends Component {
    * Package publisher.
    */
   public readonly publisher: Publisher;
+
+  /**
+   * Location of build artifacts.
+   */
+  public readonly artifactsDirectory: string;
 
   private readonly buildTask: Task;
   private readonly version: Version;
@@ -267,16 +372,17 @@ export class Release extends Component {
   private readonly defaultBranch: ReleaseBranch;
   private readonly github?: GitHub;
   private readonly workflowRunsOn?: string[];
-
+  private readonly workflowRunsOnGroup?: GroupRunnerOptions;
+  private readonly workflowPermissions: JobPermissions;
+  private readonly releaseTagFilePath: string;
   private readonly _branchHooks: BranchHook[];
 
   /**
-   * Location of build artifacts.
+   * @param scope should be part of the project the Release belongs to.
+   * @param options options to configure the Release Component.
    */
-  public readonly artifactsDirectory: string;
-
-  constructor(project: GitHubProject, options: ReleaseOptions) {
-    super(project);
+  constructor(scope: IConstruct, options: ReleaseOptions) {
+    super(scope);
 
     if (Array.isArray(options.releaseBranches)) {
       throw new Error(
@@ -284,15 +390,22 @@ export class Release extends Component {
       );
     }
 
-    this.github = project.github;
+    this.github = GitHub.of(this.project.root);
     this.buildTask = options.task;
     this.preBuildSteps = options.releaseWorkflowSetupSteps ?? [];
     this.postBuildSteps = options.postBuildSteps ?? [];
-    this.artifactsDirectory = options.artifactsDirectory ?? "dist";
+    this.artifactsDirectory =
+      options.artifactsDirectory ?? DEFAULT_ARTIFACTS_DIRECTORY;
+    ensureNotHiddenPath(this.artifactsDirectory, "artifactsDirectory");
     this.versionFile = options.versionFile;
     this.releaseTrigger = options.releaseTrigger ?? ReleaseTrigger.continuous();
     this.containerImage = options.workflowContainerImage;
     this.workflowRunsOn = options.workflowRunsOn;
+    this.workflowRunsOnGroup = options.workflowRunsOnGroup;
+    this.workflowPermissions = {
+      contents: JobPermission.WRITE,
+      ...options.workflowPermissions,
+    };
     this._branchHooks = [];
 
     /**
@@ -317,23 +430,35 @@ export class Release extends Component {
       });
     }
 
-    this.version = new Version(project, {
+    this.version = new Version(this.project, {
       versionInputFile: this.versionFile,
       artifactsDirectory: this.artifactsDirectory,
       versionrcOptions: options.versionrcOptions,
       tagPrefix: options.releaseTagPrefix,
+      releasableCommits: options.releasableCommits,
+      bumpPackage: options.bumpPackage,
+      nextVersionCommand: options.nextVersionCommand,
     });
 
-    this.publisher = new Publisher(project, {
+    this.releaseTagFilePath = path.posix.normalize(
+      path.posix.join(this.artifactsDirectory, this.version.releaseTagFileName)
+    );
+
+    this.publisher = new Publisher(this.project, {
       artifactName: this.artifactsDirectory,
-      condition: `needs.${BUILD_JOBID}.outputs.${LATEST_COMMIT_OUTPUT} == github.sha`,
+      condition: DEPENDENT_JOB_CONDITIONAL,
       buildJobId: BUILD_JOBID,
       jsiiReleaseVersion: options.jsiiReleaseVersion,
       failureIssue: options.releaseFailureIssue,
       failureIssueLabel: options.releaseFailureIssueLabel,
-      workflowRunsOn: options.workflowRunsOn,
+      ...filteredWorkflowRunsOnOptions(
+        options.workflowRunsOn,
+        options.workflowRunsOnGroup
+      ),
       publishTasks: options.publishTasks,
       dryRun: options.publishDryRun,
+      workflowNodeVersion: options.workflowNodeVersion,
+      workflowContainerImage: options.workflowContainerImage,
     });
 
     const githubRelease = options.githubRelease ?? true;
@@ -359,7 +484,9 @@ export class Release extends Component {
       prerelease: options.prerelease,
       majorVersion: options.majorVersion,
       minMajorVersion: options.minMajorVersion,
-      workflowName: options.releaseWorkflowName ?? "release",
+      workflowName:
+        options.releaseWorkflowName ??
+        workflowNameForProject("release", this.project),
       tagPrefix: options.releaseTagPrefix,
       npmDistTag: options.npmDistTag,
     });
@@ -477,8 +604,10 @@ export class Release extends Component {
   private createWorkflow(
     branchName: string,
     branch: Partial<BranchOptions>
-  ): TaskWorkflow | undefined {
-    const workflowName = branch.workflowName ?? `release-${branchName}`;
+  ): GithubWorkflow | undefined {
+    const workflowName =
+      branch.workflowName ??
+      workflowNameForProject(`release-${branchName}`, this.project);
 
     // to avoid race conditions between two commits trying to release the same
     // version, we check if the head sha is identical to the remote sha. if
@@ -490,19 +619,14 @@ export class Release extends Component {
 
     const env: Record<string, string> = {
       RELEASE: "true",
+      ...this.version.envForBranch({
+        majorVersion: branch.majorVersion,
+        minorVersion: branch.minorVersion,
+        minMajorVersion: branch.minMajorVersion,
+        prerelease: branch.prerelease,
+        tagPrefix: branch.tagPrefix,
+      }),
     };
-
-    if (branch.majorVersion !== undefined) {
-      env.MAJOR = branch.majorVersion.toString();
-    }
-
-    if (branch.prerelease) {
-      env.PRERELEASE = branch.prerelease;
-    }
-
-    if (branch.tagPrefix) {
-      env.RELEASE_TAG_PREFIX = branch.tagPrefix;
-    }
 
     // the "release" task prepares a release but does not publish anything. the
     // output of the release task is: `dist`, `.version.txt`, and
@@ -552,41 +676,80 @@ export class Release extends Component {
 
     const postBuildSteps = [...this.postBuildSteps];
 
+    // Read the releasetag, then check if it already exists.
+    // If it does, we will cancel this release
+    postBuildSteps.push(
+      WorkflowSteps.tagExists(`$(cat ${this.releaseTagFilePath})`, {
+        name: "Check if version has already been tagged",
+        id: TAG_EXISTS_STEPID,
+      })
+    );
+
     // check if new commits were pushed to the repo while we were building.
     // if new commits have been pushed, we will cancel this release
     postBuildSteps.push({
       name: "Check for new commits",
       id: GIT_REMOTE_STEPID,
-      run: `echo ::set-output name=${LATEST_COMMIT_OUTPUT}::"$(git ls-remote origin -h \${{ github.ref }} | cut -f1)"`,
+      run: [
+        `echo "${LATEST_COMMIT_OUTPUT}=$(git ls-remote origin -h \${{ github.ref }} | cut -f1)" >> $GITHUB_OUTPUT`,
+        "cat $GITHUB_OUTPUT",
+      ].join("\n"),
     });
 
-    postBuildSteps.push({
-      name: "Upload artifact",
-      if: noNewCommits,
-      uses: "actions/upload-artifact@v2.1.1",
-      with: {
-        name: BUILD_ARTIFACT_NAME,
-        path: this.artifactsDirectory,
+    const projectPathRelativeToRoot = path.relative(
+      this.project.root.outdir,
+      this.project.outdir
+    );
+    const normalizedProjectPathRelativeToRoot = normalizePersistedPath(
+      projectPathRelativeToRoot
+    );
+
+    postBuildSteps.push(
+      {
+        name: "Backup artifact permissions",
+        if: noNewCommits,
+        continueOnError: true,
+        run: `cd ${this.artifactsDirectory} && getfacl -R . > ${PERMISSION_BACKUP_FILE}`,
       },
-    });
+      WorkflowSteps.uploadArtifact({
+        if: noNewCommits,
+        with: {
+          name: BUILD_ARTIFACT_NAME,
+          path:
+            normalizedProjectPathRelativeToRoot.length > 0
+              ? `${normalizedProjectPathRelativeToRoot}/${this.artifactsDirectory}`
+              : this.artifactsDirectory,
+        },
+      })
+    );
 
     if (this.github && !this.releaseTrigger.isManual) {
-      return new TaskWorkflow(this.github, {
-        name: workflowName,
-        jobId: BUILD_JOBID,
+      // Use target (possible parent) GitHub to create the workflow
+      const workflow = new GithubWorkflow(this.github, workflowName, {
+        // see https://github.com/projen/projen/issues/3761
+        limitConcurrency: true,
+      });
+      workflow.on({
+        schedule: this.releaseTrigger.schedule
+          ? [{ cron: this.releaseTrigger.schedule }]
+          : undefined,
+        push: this.releaseTrigger.isContinuous
+          ? { branches: [branchName], paths: this.releaseTrigger.paths }
+          : undefined,
+        workflowDispatch: {}, // allow manual triggering
+      });
+
+      // Create job based on child (only?) project GitHub
+      const taskjob = new TaskWorkflowJob(this, releaseTask, {
         outputs: {
-          latest_commit: {
+          [LATEST_COMMIT_OUTPUT]: {
             stepId: GIT_REMOTE_STEPID,
             outputName: LATEST_COMMIT_OUTPUT,
           },
-        },
-        triggers: {
-          schedule: this.releaseTrigger.schedule
-            ? [{ cron: this.releaseTrigger.schedule }]
-            : undefined,
-          push: this.releaseTrigger.isContinuous
-            ? { branches: [branchName] }
-            : undefined,
+          [TAG_EXISTS_OUTPUT]: {
+            stepId: TAG_EXISTS_STEPID,
+            outputName: "exists",
+          },
         },
         container: this.containerImage
           ? { image: this.containerImage }
@@ -594,19 +757,31 @@ export class Release extends Component {
         env: {
           CI: "true",
         },
-        permissions: {
-          contents: JobPermission.WRITE,
-        },
+        permissions: this.workflowPermissions,
         checkoutWith: {
-          // we must use 'fetch-depth=0' in order to fetch all tags
-          // otherwise tags are not checked out
-          "fetch-depth": 0,
+          // fetch-depth= indicates all history for all branches and tags
+          // we must use this in order to fetch all tags
+          // and to inspect the history to decide if we should release
+          fetchDepth: 0,
         },
         preBuildSteps,
-        task: releaseTask,
         postBuildSteps,
-        runsOn: this.workflowRunsOn,
+        jobDefaults:
+          normalizedProjectPathRelativeToRoot.length > 0 // is subproject
+            ? {
+                run: {
+                  workingDirectory: ensureRelativePathStartsWithDot(
+                    normalizedProjectPathRelativeToRoot
+                  ),
+                },
+              }
+            : undefined,
+        ...filteredRunsOnOptions(this.workflowRunsOn, this.workflowRunsOnGroup),
       });
+
+      workflow.addJob(BUILD_JOBID, taskjob);
+
+      return workflow;
     } else {
       return undefined;
     }
@@ -632,6 +807,11 @@ export interface BranchOptions {
    * The minimum major version to release.
    */
   readonly minMajorVersion?: number;
+
+  /**
+   * The minor versions released from this branch.
+   */
+  readonly minorVersion?: number;
 
   /**
    * Bump the version as a pre-release tag.

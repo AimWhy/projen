@@ -1,17 +1,21 @@
 import * as path from "path";
 import * as semver from "semver";
-import { PROJEN_DIR, PROJEN_RC } from "../common";
+import { PROJEN_DIR } from "../common";
 import { Component } from "../component";
+import { DependencyType } from "../dependencies";
 import {
   Eslint,
   EslintOptions,
   Jest,
   NodeProject,
   NodeProjectOptions,
+  Projenrc as NodeProjectProjenrc,
+  Transform,
   TypeScriptCompilerOptions,
   TypescriptConfig,
   TypescriptConfigOptions,
 } from "../javascript";
+import { hasDependencyVersion } from "../javascript/util";
 import { SampleDir } from "../sample-file";
 import { Task } from "../task";
 import { TextFile } from "../textfile";
@@ -20,6 +24,216 @@ import {
   ProjenrcOptions as ProjenrcTsOptions,
   TypedocDocgen,
 } from "../typescript";
+import { deepMerge, normalizePersistedPath } from "../util";
+
+/**
+ * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options/babelConfig/
+ */
+export class TsJestBabelConfig {
+  /**
+   * Disables the use of Babel
+   */
+  public static disabled() {
+    return new TsJestBabelConfig(false);
+  }
+
+  /**
+   * Enables Babel processing
+   *
+   * `ts-jest` will try to find an existing Babel configuration and pass it to the `babel-jest` processor.
+   */
+  public static autoDetectConfig() {
+    return new TsJestBabelConfig(true);
+  }
+
+  /**
+   * Path to a babelrc file
+   *
+   * The path should be relative to the current working directory where you start Jest from. You can also use `<rootDir>` in the path.
+   */
+  public static fromFile(filePath: string) {
+    return new TsJestBabelConfig(filePath);
+  }
+
+  /**
+   * Inline compiler options
+   * @see https://babeljs.io/docs/options
+   */
+  public static custom(config: Record<string, any>) {
+    return new TsJestBabelConfig(config);
+  }
+
+  private constructor(
+    private readonly config: boolean | string | Record<string, any>
+  ) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON(): boolean | string | Record<string, any> {
+    return this.config;
+  }
+}
+
+/**
+ * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options/diagnostics/
+ */
+export class TsJestDiagnostics {
+  /**
+   * Enable all diagnostics.
+   */
+  public static all() {
+    return new TsJestDiagnostics(true);
+  }
+
+  /**
+   * Disable all diagnostics.
+   */
+  public static none() {
+    return new TsJestDiagnostics(false);
+  }
+
+  /**
+   * Provide a custom diagnostics configuration.
+   *
+   * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options/diagnostics/
+   */
+  public static custom(config: Record<string, any>) {
+    return new TsJestDiagnostics(config);
+  }
+
+  private constructor(private readonly config: boolean | Record<string, any>) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON(): boolean | Record<string, any> {
+    return this.config;
+  }
+}
+
+/**
+ * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options/tsconfig/
+ */
+export class TsJestTsconfig {
+  /**
+   * Uses `tsconfig.json` if found, or the built-in default TypeScript compiler options.
+   */
+  public static auto() {
+    return new TsJestTsconfig(true);
+  }
+
+  /**
+   * Force` ts-jest` to use its built-in defaults even if there is a `tsconfig.json` in your project.
+   */
+  public static builtInDefaults() {
+    return new TsJestTsconfig(false);
+  }
+
+  /**
+   * Path to a `tsconfig` file
+   *
+   * The path should be relative to the current working directory where you start Jest from. You can also use `<rootDir>` in the path to start from the project root dir.
+   */
+  public static fromFile(filePath: string) {
+    return new TsJestTsconfig(filePath);
+  }
+
+  /**
+   * Inline compiler options
+   *
+   * @see TypescriptConfigOptions
+   */
+  public static custom(config: TypescriptConfigOptions) {
+    return new TsJestTsconfig(config);
+  }
+
+  private constructor(
+    private readonly config: boolean | string | TypescriptConfigOptions
+  ) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON(): boolean | string | TypescriptConfigOptions {
+    return this.config;
+  }
+}
+
+/**
+ * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options
+ */
+export interface TsJestTransformOptions {
+  /**
+   * Custom TypeScript AST transformers
+   *
+   * @default auto
+   */
+  readonly astTransformers?: Record<string, any>;
+  /**
+   * Babel(Jest) related configuration.
+   *
+   * @default TsJestBabelConfig.disabled()
+   */
+  readonly babelConfig?: TsJestBabelConfig;
+  /**
+   * TypeScript module to use as compiler.
+   *
+   * @default "typescript"
+   */
+  readonly compiler?: string;
+  /**
+   * Diagnostics related configuration.
+   *
+   * @default TsJestDiagnostics.all()
+   */
+  readonly diagnostics?: TsJestDiagnostics;
+  /**
+   * Run ts-jest tests with this TSConfig isolatedModules setting.
+   *
+   * You'll lose type-checking ability and some features such as const enum, but in the case you plan on using Jest with the cache disabled (jest --no-cache), your tests will then run much faster.
+   * @see https://kulshekhar.github.io/ts-jest/docs/getting-started/options/isolatedModules
+   *
+   * @default false
+   */
+  readonly isolatedModules?: boolean;
+  /**
+   * Files which will become modules returning self content.
+   *
+   * @default disabled
+   */
+  readonly stringifyContentPathRegex?: string;
+  /**
+   * TypeScript compiler related configuration.
+   *
+   * @default - Your project's `tsconfigDev` file.
+   */
+  readonly tsconfig?: TsJestTsconfig;
+  /**
+   * Enable ESM support
+   *
+   * @default auto
+   */
+  readonly useESM?: boolean;
+}
+
+export interface TsJestOptions {
+  /**
+   * Which files should ts-jest act upon.
+   *
+   * @see https://jestjs.io/docs/configuration#transform-objectstring-pathtotransformer--pathtotransformer-object
+   *
+   * @default "^.+\\.[t]sx?$"
+   */
+  readonly transformPattern?: string;
+  /**
+   * Override the default ts-jest transformer configuration.
+   */
+  readonly transformOptions?: TsJestTransformOptions;
+}
 
 export interface TypeScriptProjectOptions extends NodeProjectOptions {
   /**
@@ -111,6 +325,12 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
    * @default false
    */
   readonly disableTsconfig?: boolean;
+  /**
+   * Do not generate a `tsconfig.dev.json` file.
+   *
+   * @default false
+   */
+  readonly disableTsconfigDev?: boolean;
 
   /**
    * Generate one-time sample in `src/` and `test/` if there are no files there.
@@ -128,6 +348,7 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
    * Use TypeScript for your projenrc file (`.projenrc.ts`).
    *
    * @default false
+   * @pjnew true
    */
   readonly projenrcTs?: boolean;
 
@@ -135,6 +356,11 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
    * Options for .projenrc.ts
    */
   readonly projenrcTsOptions?: ProjenrcTsOptions;
+
+  /**
+   * Options for ts-jest
+   */
+  readonly tsJestOptions?: TsJestOptions;
 }
 
 /**
@@ -142,6 +368,8 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
  * @pjid typescript
  */
 export class TypeScriptProject extends NodeProject {
+  public static readonly DEFAULT_TS_JEST_TRANFORM_PATTERN = "^.+\\.[t]sx?$";
+
   public readonly docgen?: boolean;
   public readonly docsDirectory: string;
   public readonly eslint?: Eslint;
@@ -184,7 +412,7 @@ export class TypeScriptProject extends NodeProject {
         ...options.jestOptions,
         jestConfig: {
           ...options.jestOptions?.jestConfig,
-          testMatch: [],
+          testMatch: options.jestOptions?.jestConfig?.testMatch ?? [],
         },
       },
     });
@@ -195,11 +423,16 @@ export class TypeScriptProject extends NodeProject {
     this.docgen = options.docgen;
     this.docsDirectory = options.docsDirectory ?? "docs/";
 
-    this.compileTask.exec("tsc --build");
+    const tsconfigFilename = options.tsconfig?.fileName;
+    this.compileTask.exec(
+      ["tsc", "--build", tsconfigFilename].filter(Boolean).join(" ")
+    );
 
     this.watchTask = this.addTask("watch", {
       description: "Watch & compile in the background",
-      exec: "tsc --build -w",
+      exec: ["tsc", "--build", "-w", tsconfigFilename]
+        .filter(Boolean)
+        .join(" "),
     });
 
     this.testdir = options.testdir ?? "test";
@@ -211,40 +444,21 @@ export class TypeScriptProject extends NodeProject {
     const compiledTests = this.testdir.startsWith(this.srcdir + path.posix.sep);
 
     if (options.entrypointTypes || this.entrypoint !== "") {
+      const entrypointPath = path.join(
+        path.dirname(this.entrypoint),
+        path.basename(this.entrypoint, ".js")
+      );
+      const normalizedPath = normalizePersistedPath(entrypointPath);
       const entrypointTypes =
-        options.entrypointTypes ??
-        `${path
-          .join(
-            path.dirname(this.entrypoint),
-            path.basename(this.entrypoint, ".js")
-          )
-          .replace(/\\/g, "/")}.d.ts`;
+        options.entrypointTypes ?? `${normalizedPath}.d.ts`;
       this.package.addField("types", entrypointTypes);
     }
 
-    const compilerOptionDefaults: TypeScriptCompilerOptions = {
-      alwaysStrict: true,
-      declaration: true,
-      esModuleInterop: true,
-      experimentalDecorators: true,
-      inlineSourceMap: true,
-      inlineSources: true,
-      lib: ["es2019"],
-      module: "CommonJS",
-      noEmitOnError: false,
-      noFallthroughCasesInSwitch: true,
-      noImplicitAny: true,
-      noImplicitReturns: true,
-      noImplicitThis: true,
-      noUnusedLocals: true,
-      noUnusedParameters: true,
-      resolveJsonModule: true,
-      strict: true,
-      strictNullChecks: true,
-      strictPropertyInitialization: true,
-      stripInternal: true,
-      target: "ES2019",
-    };
+    if (options.disableTsconfigDev && options.disableTsconfig) {
+      throw new Error(
+        "Cannot specify both 'disableTsconfigDev' and 'disableTsconfig' fields."
+      );
+    }
 
     if (!options.disableTsconfig) {
       this.tsconfig = new TypescriptConfig(
@@ -256,7 +470,7 @@ export class TypeScriptProject extends NodeProject {
             compilerOptions: {
               rootDir: this.srcdir,
               outDir: this.libdir,
-              ...compilerOptionDefaults,
+              ...this.defaultTypeScriptCompilerOptions(),
             },
           },
           options.tsconfig
@@ -264,24 +478,25 @@ export class TypeScriptProject extends NodeProject {
       );
     }
 
-    const tsconfigDevFile = options.tsconfigDevFile ?? "tsconfig.dev.json";
-    this.tsconfigDev = new TypescriptConfig(
-      this,
-      mergeTsconfigOptions(
-        {
-          fileName: tsconfigDevFile,
-          include: [
-            PROJEN_RC,
-            `${this.srcdir}/**/*.ts`,
-            `${this.testdir}/**/*.ts`,
-          ],
-          exclude: ["node_modules"],
-          compilerOptions: compilerOptionDefaults,
-        },
-        options.tsconfig,
-        options.tsconfigDev
-      )
-    );
+    if (options.disableTsconfigDev) {
+      this.tsconfigDev = this.tsconfig!;
+    } else {
+      const tsconfigDevFile = options.tsconfigDevFile ?? "tsconfig.dev.json";
+      this.tsconfigDev = new TypescriptConfig(
+        this,
+        mergeTsconfigOptions(
+          {
+            fileName: tsconfigDevFile,
+            include: [`${this.srcdir}/**/*.ts`, `${this.testdir}/**/*.ts`],
+
+            exclude: ["node_modules"],
+            compilerOptions: this.defaultTypeScriptCompilerOptions(),
+          },
+          options.tsconfig,
+          options.tsconfigDev
+        )
+      );
+    }
 
     this.gitignore.include(`/${this.srcdir}/`);
     this.npmignore?.exclude(`/${this.srcdir}/`);
@@ -315,55 +530,42 @@ export class TypeScriptProject extends NodeProject {
       if (compiledTests) {
         this.addJestCompiled(this.jest);
       } else {
-        this.addJestNoCompile(this.jest);
+        this.addJestNoCompile(this.jest, options?.tsJestOptions);
       }
     }
 
-    const projenrcTypeScript = options.projenrcTs ?? false;
-
-    const projenRcFilename = projenrcTypeScript
-      ? options.projenrcTsOptions?.filename ?? ".projenrc.ts"
-      : undefined;
-
     if (options.eslint ?? true) {
-      const devdirs = [this.testdir, "build-tools"];
-      if (projenrcTypeScript) {
-        devdirs.push(options.projenrcTsOptions?.projenCodeDir ?? "projenrc");
-      }
-
       this.eslint = new Eslint(this, {
         tsconfigPath: `./${this.tsconfigDev.fileName}`,
         dirs: [this.srcdir],
-        devdirs,
+        devdirs: [this.testdir, "build-tools"],
         fileExtensions: [".ts", ".tsx"],
-        lintProjenRcFile: projenRcFilename,
+        lintProjenRc: false,
         ...options.eslintOptions,
       });
 
       this.tsconfigEslint = this.tsconfigDev;
     }
 
-    if (projenrcTypeScript) {
-      new ProjenrcTs(this, options.projenrcTsOptions);
+    // when this is a root project
+    if (!this.parent) {
+      if (options.projenrcTs) {
+        new ProjenrcTs(this, options.projenrcTsOptions);
+      } else {
+        // projenrc.js created in NodeProject needs to be added in tsconfigDev
+        const projenrcJs = NodeProjectProjenrc.of(this);
+        if (projenrcJs) {
+          this.tsconfigDev.addInclude(projenrcJs.filePath);
+        }
+      }
     }
 
-    const tsver = options.typescriptVersion
-      ? `@${options.typescriptVersion}`
-      : "";
+    const tsDep = options.typescriptVersion
+      ? `typescript@${options.typescriptVersion}`
+      : "typescript";
+    this.addDevDeps(tsDep);
 
-    this.addDevDeps(
-      `typescript${tsver}`,
-      // @types/node versions numbers match the node runtime versions' major.minor, however, new
-      // releases are only created when API changes are included in a node release... We might for
-      // example have dependencies that require `node >= 12.22`, but as 12.21 and 12.22 did not
-      // include API changes, `@types/node@12.20.x` is the "correct" version to use. As it is not
-      // possible to easily determine the correct version to use, we pick up the latest version.
-      //
-      // Additionally, we default to tracking the 12.x line, as the current earliest LTS release of
-      // node is 12.x, so this is what corresponds to the broadest compatibility with supported node
-      // runtimes.
-      `@types/node@^${semver.major(this.package.minNodeVersion ?? "14.0.0")}`
-    );
+    this.addNodeTypesVersion(options.typescriptVersion, options.minNodeVersion);
 
     // generate sample code in `src` and `lib` if these directories are empty or non-existent.
     if (options.sampleCode ?? true) {
@@ -373,6 +575,66 @@ export class TypeScriptProject extends NodeProject {
     if (this.docgen) {
       new TypedocDocgen(this);
     }
+  }
+
+  /**
+   * Projen default Typescript compiler options.
+   */
+  protected defaultTypeScriptCompilerOptions(): TypeScriptCompilerOptions {
+    return {
+      alwaysStrict: true,
+      declaration: true,
+      esModuleInterop: true,
+      experimentalDecorators: true,
+      inlineSourceMap: true,
+      inlineSources: true,
+      lib: ["es2019"],
+      module: "CommonJS",
+      noEmitOnError: false,
+      noFallthroughCasesInSwitch: true,
+      noImplicitAny: true,
+      noImplicitReturns: true,
+      noImplicitThis: true,
+      noUnusedLocals: true,
+      noUnusedParameters: true,
+      resolveJsonModule: true,
+      strict: true,
+      strictNullChecks: true,
+      strictPropertyInitialization: true,
+      stripInternal: true,
+      target: "ES2019",
+    };
+  }
+
+  /**
+   * Add `@types/node` to this project.
+   *
+   * If the user has already added this dependency, do nothing.
+   * Otherwise use the major version of `minNodeVersion`.
+   * If that's not available, match the version to the used typescript version.
+   * And if that is also not available, we use latest and let the user manage the version.
+   */
+  private addNodeTypesVersion(tsVersion?: string, minNodeVersion?: string) {
+    const name = "@types/node";
+
+    if (this.deps.tryGetDependency(name, DependencyType.BUILD)) {
+      return;
+    }
+
+    if (minNodeVersion) {
+      const minNodeParsed = semver.minVersion(minNodeVersion);
+      if (minNodeParsed) {
+        return this.addDevDeps(`${name}@^${minNodeParsed.major}`);
+      }
+    }
+
+    // coerce version, since the ts version likely something like ~5.3.0
+    const tsParsed = semver.coerce(tsVersion);
+    if (tsParsed) {
+      return this.addDevDeps(`${name}@ts${tsParsed.major}.${tsParsed.minor}`);
+    }
+
+    this.addDevDeps(name);
   }
 
   /**
@@ -387,7 +649,11 @@ export class TypeScriptProject extends NodeProject {
     const srctest = this.testdir;
 
     this.npmignore?.exclude(`/${libtest}/`);
-    jest.addTestMatch(`**/${libtest}/**/?(*.)+(spec|test).js?(x)`);
+    jest.discoverTestMatchPatternsForDirs([libtest], {
+      fileExtensionPattern: this.tsconfig?.compilerOptions?.allowJs
+        ? undefined
+        : "js?(x)",
+    });
     jest.addWatchIgnorePattern(`/${this.srcdir}/`);
 
     const resolveSnapshotPath = (test: string, ext: string) => {
@@ -428,24 +694,87 @@ export class TypeScriptProject extends NodeProject {
     jest.addSnapshotResolver(`./${resolver.path}`);
   }
 
-  private addJestNoCompile(jest: Jest) {
+  private addJestNoCompile(
+    jest: Jest,
+    tsJestOptions: TsJestOptions | undefined
+  ) {
     this.addDevDeps(
       `@types/jest${jest.jestVersion}`,
       `ts-jest${jest.jestVersion}`
     );
 
-    jest.addTestMatch(`<rootDir>/${this.srcdir}/**/__tests__/**/*.ts?(x)`);
-    jest.addTestMatch(
-      `<rootDir>/(${this.testdir}|${this.srcdir})/**/*(*.)@(spec|test).ts?(x)`
-    );
+    jest.discoverTestMatchPatternsForDirs([this.srcdir, this.testdir], {
+      fileExtensionPattern: this.tsconfig?.compilerOptions?.allowJs
+        ? undefined
+        : "ts?(x)",
+    });
 
-    // add relevant deps
-    jest.config.preset = "ts-jest";
-    jest.config.globals = {
-      "ts-jest": {
-        tsconfig: this.tsconfigDev.fileName,
+    // Test for the ts-jest version that was requested;
+    //
+    // - First, check the `jest` version that is requested via projen properties. This
+    //   should be the same as the `ts-jest` version anyway.
+    // - If none found, fall back to inspecting the actual `ts-jest` version
+    //   that happens to be installed.
+    let hasTsJest29: boolean | undefined;
+    if (jest.jestVersion) {
+      // We could maybe replace this will full "actual version" checking, but
+      // the tests depend on this and the reading of 'package.json' is very
+      // awkward to test.
+      // Note that we use the requested version of `jest` as a proxy for the
+      // version of `ts-jest`, which is what we're actually interested in.
+      const major = semver.coerce(jest.jestVersion)?.major;
+      hasTsJest29 = major ? major >= 29 : undefined;
+    }
+    if (hasTsJest29 === undefined) {
+      hasTsJest29 = hasDependencyVersion(this, "ts-jest", ">= 29");
+    }
+
+    // add relevant deps (we treat "unknown" as having a modern ts-jest)
+    if (hasTsJest29 !== false) {
+      return this.addJestNoCompileModern(jest, tsJestOptions);
+    }
+    this.addJestNoCompileLegacy(jest, tsJestOptions);
+  }
+
+  private addJestNoCompileModern(
+    jest: Jest,
+    tsJestOptions: TsJestOptions | undefined
+  ) {
+    jest.config.transform = deepMerge([
+      {
+        [tsJestOptions?.transformPattern ??
+        TypeScriptProject.DEFAULT_TS_JEST_TRANFORM_PATTERN]: new Transform(
+          "ts-jest",
+          {
+            tsconfig: TsJestTsconfig.fromFile(this.tsconfigDev.fileName),
+            ...(tsJestOptions?.transformOptions ?? {}),
+          }
+        ),
       },
-    };
+      jest.config.transform,
+    ]);
+  }
+
+  private addJestNoCompileLegacy(
+    jest: Jest,
+    tsJestOptions: TsJestOptions | undefined
+  ) {
+    if (tsJestOptions) {
+      this.logger.warn(
+        "You are using a legacy version (<29) of jest and ts-jest that does not support tsJestOptions, they will be ignored."
+      );
+    }
+    if (!jest.config.preset) {
+      jest.config.preset = "ts-jest";
+    }
+    jest.config.globals = deepMerge([
+      {
+        "ts-jest": {
+          tsconfig: this.tsconfigDev.fileName,
+        },
+      },
+      jest.config.globals,
+    ]);
   }
 }
 
@@ -491,11 +820,14 @@ class SampleCode extends Component {
  */
 export class TypeScriptAppProject extends TypeScriptProject {
   constructor(options: TypeScriptProjectOptions) {
+    // Releasing and packaging are coupled. If one is disabled, disable the other by default.
+    const shouldRelease = options.release ?? options.releaseWorkflow ?? false;
+
     super({
+      release: shouldRelease,
+      package: shouldRelease,
       allowLibraryDependencies: false,
-      releaseWorkflow: false,
       entrypoint: "", // "main" is not needed in typescript apps
-      package: false,
       ...options,
     });
   }

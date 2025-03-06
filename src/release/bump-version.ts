@@ -1,8 +1,10 @@
+import { promises as fs, existsSync } from "fs";
 import { dirname, join } from "path";
 import { Config } from "conventional-changelog-config-spec";
-import { mkdirp, pathExists, readFile, remove, writeFile } from "fs-extra";
+import { compare, inc, ReleaseType } from "semver";
 import * as logging from "../logging";
-import { exec, execCapture } from "../util";
+import { exec, execCapture, execOrUndefined } from "../util";
+import { ReleasableCommits } from "../version";
 
 export interface BumpOptions {
   /**
@@ -44,6 +46,14 @@ export interface BumpOptions {
   readonly minMajorVersion?: number;
 
   /**
+   * Defines the minor version line. This is used to select the latest version
+   * and also enforce that new minor versions are not released accidentally.
+   *
+   * @default - any version is supported
+   */
+  readonly minorVersion?: number;
+
+  /**
    * The name of a file which will include the output version number (a text file).
    *
    * Relative to cwd.
@@ -68,17 +78,62 @@ export interface BumpOptions {
   readonly tagPrefix?: string;
 
   /**
-   * Conguration values that would append to versionrc file or overwrite values
+   * Configuration values that would append to versionrc file or overwrite values
    * coming to that from default one.
    */
   readonly versionrcOptions?: Config;
+
+  /**
+   * A shell command to list all release commits since the latest tag.
+   *
+   * A new release will be initiated, if the number of returned commits is greater than zero.
+   *
+   * `$LATEST_TAG` will be replaced with the actual latest tag for the given prefix.
+   *
+   * @default "git log --oneline $LATEST_TAG..HEAD"
+   */
+  readonly releasableCommits?: string;
+
+  /**
+   * The `commit-and-tag-version` compatible package used to bump the package version, as a dependency string.
+   *
+   * This can be any compatible package version, including the deprecated `standard-version@9`.
+   *
+   * @default "commit-and-tag-version@12"
+   */
+  readonly bumpPackage?: string;
+
+  /**
+   * A shell command to control the next version to release.
+   *
+   * If present, this shell command will be run before the bump is executed, and
+   * it determines what version to release. It will be executed in the following
+   * environment:
+   *
+   * - Working directory: the project directory.
+   * - `$VERSION`: the current version. Looks like `1.2.3`.
+   * - `$LATEST_TAG`: the most recent tag. Looks like `prefix-v1.2.3`, or may be unset.
+   *
+   * The command should print one of the following to `stdout`:
+   *
+   * - Nothing: the next version number will be determined based on commit history.
+   * - `x.y.z`: the next version number will be `x.y.z`.
+   * - `major|minor|patch`: the next version number will be the current version number
+   *   with the indicated component bumped.
+   *
+   * This setting cannot be specified together with `minMajorVersion`; the invoked
+   * script can be used to achieve the effects of `minMajorVersion`.
+   *
+   * @default - The next version will be determined based on the commit history and project settings.
+   */
+  readonly nextVersionCommand?: string;
 }
 
 /**
- * Resolves the latest version from git tags and uses `standard-version` to bump
+ * Resolves the latest version from git tags and uses `commit-and-tag-version` to bump
  * to the next version based on commits.
  *
- * This expects `standard-version` to be installed in the path.
+ * This expects `commit-and-tag-version` to be installed in the path.
  *
  * @param cwd working directory (git repository)
  * @param options options
@@ -87,56 +142,128 @@ export async function bump(cwd: string, options: BumpOptions) {
   const versionFile = join(cwd, options.versionFile);
   const prerelease = options.prerelease;
   const major = options.majorVersion;
+  const minor = options.minorVersion;
   const minMajorVersion = options.minMajorVersion;
   const prefix = options.tagPrefix ?? "";
   const bumpFile = join(cwd, options.bumpFile);
   const changelogFile = join(cwd, options.changelog);
   const releaseTagFile = join(cwd, options.releaseTagFile);
+  const bumpPackage = options.bumpPackage ?? "commit-and-tag-version@^12";
+
   if (major && minMajorVersion) {
     throw new Error(
       `minMajorVersion and majorVersion cannot be used together.`
     );
   }
+  if (options.nextVersionCommand && minMajorVersion) {
+    throw new Error(
+      `minMajorVersion and nextVersionCommand cannot be used together.`
+    );
+  }
+  if (minor && !major) {
+    throw new Error(`minorVersion and majorVersion must be used together.`);
+  }
 
-  await mkdirp(dirname(bumpFile));
-  await mkdirp(dirname(changelogFile));
-  await mkdirp(dirname(releaseTagFile));
+  await fs.mkdir(dirname(bumpFile), { recursive: true });
+  await fs.mkdir(dirname(changelogFile), { recursive: true });
+  await fs.mkdir(dirname(releaseTagFile), { recursive: true });
 
   const { latestVersion, latestTag, isFirstRelease } = determineLatestTag({
     cwd,
     major,
+    minor,
     prerelease,
     prefix,
   });
 
-  const content = await tryReadVersionFile(versionFile);
+  const { contents, newline } = await tryReadVersionFile(versionFile);
 
   // update version
-  content.version = latestVersion;
+  contents.version = latestVersion;
 
   logging.info(
     `Update ${versionFile} to latest resolved version: ${latestVersion}`
   );
-  await writeFile(versionFile, JSON.stringify(content, undefined, 2));
+  await fs.writeFile(
+    versionFile,
+    JSON.stringify(contents, undefined, 2) + (newline ? "\n" : "")
+  );
 
-  // check if the latest commit already has a version tag
-  const currentTags = execCapture("git tag --points-at HEAD", { cwd })
-    .toString("utf8")
-    .split("\n");
-  logging.info(`Tags listed on current commit: ${currentTags}`);
-
+  // check for commits since the last release tag
   let skipBump = false;
+  let restoreTag = false;
 
-  if (currentTags.includes(latestTag)) {
-    logging.info("Skipping bump...");
-    skipBump = true;
+  // First Release is never skipping bump
+  if (!isFirstRelease) {
+    const findCommits = (
+      options.releasableCommits ?? ReleasableCommits.everyCommit().cmd
+    ).replace("$LATEST_TAG", latestTag);
+    const commitsSinceLastTag = execOrUndefined(findCommits, { cwd })?.split(
+      "\n"
+    );
+    const numCommitsSinceLastTag = commitsSinceLastTag?.length ?? 0;
+    logging.info(
+      `Number of commits since ${latestTag}: ${numCommitsSinceLastTag}`
+    );
 
-    // delete the existing tag (locally)
-    // if we don't do this, standard-version generates an empty changelog
-    exec(`git tag --delete ${latestTag}`, { cwd });
+    // Nothing to release right now
+    if (numCommitsSinceLastTag === 0) {
+      logging.info("Skipping bump...");
+      skipBump = true;
+      restoreTag = true;
+
+      // delete the existing tag (locally)
+      // if we don't do this, commit-and-tag-version generates an empty changelog
+      exec(`git tag --delete ${latestTag}`, { cwd });
+    }
   }
 
-  // create a standard-version configuration file
+  // Determine what version to release as
+  let releaseAs: string | undefined;
+  if (minMajorVersion) {
+    const [majorVersion] = latestVersion.split(".");
+    const majorVersionNumber = parseInt(majorVersion, 10);
+    if (majorVersionNumber < minMajorVersion) {
+      releaseAs = `${minMajorVersion}.0.0`;
+    }
+  } else if (options.nextVersionCommand) {
+    const nextVersion = execCapture(options.nextVersionCommand, {
+      cwd,
+      modEnv: {
+        VERSION: latestVersion,
+        ...(latestTag ? { LATEST_TAG: latestTag } : {}),
+      },
+    })
+      .toString()
+      .trim();
+
+    if (nextVersion) {
+      // Calculate the next version
+      if (isReleaseType(nextVersion)) {
+        releaseAs = inc(latestVersion, nextVersion)?.toString();
+      } else if (
+        isFullVersionString(nextVersion) &&
+        nextVersion !== latestVersion
+      ) {
+        releaseAs = nextVersion;
+      } else {
+        throw new Error(
+          `nextVersionCommand "${options.nextVersionCommand}" returned invalid version: ${nextVersion}`
+        );
+      }
+
+      // Don't need to validate if the final version is within the expected declared major.minor range,
+      // if given. That is done below after bumping.
+    }
+  }
+
+  // If the nextVersionCommand forced a specific release version, we shouldn't
+  // skip the bump action.
+  if (releaseAs) {
+    skipBump = false;
+  }
+
+  // create a commit-and-tag-version configuration file
   const rcfile = join(cwd, ".versionrc.json");
   await generateVersionrcFile(
     rcfile,
@@ -147,29 +274,25 @@ export async function bump(cwd: string, options: BumpOptions) {
     options.versionrcOptions
   );
 
-  const cmd = ["npx", "standard-version@^9"];
-  if (isFirstRelease) {
+  const cmd = ["npx", bumpPackage];
+  if (isFirstRelease && !minMajorVersion) {
     cmd.push("--first-release");
   }
   if (prefix) {
     cmd.push(`--tag-prefix ${prefix}v`);
   }
-  if (minMajorVersion) {
-    const [majorVersion] = latestVersion.split(".");
-    const majorVersionNumber = parseInt(majorVersion, 10);
-    if (majorVersionNumber < minMajorVersion) {
-      cmd.push(`--release-as ${minMajorVersion}.0.0`);
-    }
+  if (releaseAs) {
+    cmd.push(`--release-as ${releaseAs}`);
   }
 
   exec(cmd.join(" "), { cwd });
 
   // add the tag back if it was previously removed
-  if (currentTags.includes(latestTag)) {
+  if (restoreTag) {
     exec(`git tag ${latestTag}`, { cwd });
   }
 
-  await remove(rcfile);
+  await fs.rm(rcfile, { force: true, recursive: true });
 
   const newVersion = (await tryReadVersionFile(versionFile)).version;
   if (!newVersion) {
@@ -184,19 +307,34 @@ export async function bump(cwd: string, options: BumpOptions) {
       );
     }
   }
-
-  await writeFile(bumpFile, newVersion);
-
-  const newTag = `${prefix}v${newVersion}`;
-  await writeFile(releaseTagFile, newTag);
-}
-
-async function tryReadVersionFile(versionFile: string) {
-  if (!(await pathExists(versionFile))) {
-    return {};
+  if (minor) {
+    if (!newVersion.startsWith(`${major}.${minor}`)) {
+      throw new Error(
+        `bump failed: this branch is configured to only publish v${major}.${minor} releases - bump resulted in ${newVersion}`
+      );
+    }
   }
 
-  return JSON.parse(await readFile(versionFile, "utf8"));
+  await fs.writeFile(bumpFile, newVersion);
+
+  const newTag = `${prefix}v${newVersion}`;
+  await fs.writeFile(releaseTagFile, newTag);
+}
+
+async function tryReadVersionFile(
+  versionFile: string
+): Promise<{ contents: any; version?: string; newline: boolean }> {
+  if (!existsSync(versionFile)) {
+    return { contents: {}, newline: true };
+  }
+  const raw = await fs.readFile(versionFile, "utf-8");
+  const contents = JSON.parse(raw);
+
+  return {
+    contents,
+    version: contents.version,
+    newline: raw.endsWith("\n"),
+  };
 }
 
 interface LatestTagOptions {
@@ -208,6 +346,10 @@ interface LatestTagOptions {
    * Major version to select from.
    */
   readonly major?: number;
+  /**
+   * Minor version to select from.
+   */
+  readonly minor?: number;
   /**
    * A pre-release suffix.
    */
@@ -226,7 +368,7 @@ function generateVersionrcFile(
   prerelease?: string,
   configOptions?: Config
 ) {
-  return writeFile(
+  return fs.writeFile(
     rcfile,
     JSON.stringify(
       {
@@ -272,11 +414,17 @@ function determineLatestTag(options: LatestTagOptions): {
   latestTag: string;
   isFirstRelease: boolean;
 } {
-  const { cwd, major, prerelease, prefix } = options;
+  const { cwd, major, minor, prerelease, prefix } = options;
 
   // filter only tags for this prefix and major version if specified (start with "vNN.").
-  const prefixFilter =
-    major !== undefined ? `${prefix}v${major}.*` : `${prefix}v*`;
+  let prefixFilter: string;
+  if (major !== undefined && minor !== undefined) {
+    prefixFilter = `${prefix}v${major}.${minor}.*`;
+  } else if (major !== undefined) {
+    prefixFilter = `${prefix}v${major}.*`;
+  } else {
+    prefixFilter = `${prefix}v*`;
+  }
 
   const listGitTags = [
     "git",
@@ -291,9 +439,31 @@ function determineLatestTag(options: LatestTagOptions): {
 
   let tags = stdout?.split("\n");
 
-  // if "pre" is set, filter versions that end with "-PRE.ddd".
-  if (prerelease) {
-    tags = tags.filter((x) => new RegExp(`-${prerelease}\.[0-9]+$`).test(x));
+  // if prerelease is set and there are existing prerelease tags, filter versions that end with "-PRE.ddd".
+  const prereleaseTags = tags.filter((x) =>
+    new RegExp(`-${prerelease}\.[0-9]+$`).test(x)
+  );
+  if (prerelease && prereleaseTags.length > 0) {
+    /**
+     * Cover the following case specifically
+     * 1 - v1.0.0
+     * 2 - v1.0.1-beta.0
+     * 3 - v1.0.1-beta.1
+     * 4 - v1.0.1
+     * 5 - now publish a new release on the prerelease branch
+     *    by setting the latestTag as v1.0.1 instead of v1.0.1-beta.1
+     */
+    const releaseTags = tags.filter((x) =>
+      new RegExp(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`).test(x)
+    );
+    if (
+      releaseTags.length > 0 &&
+      compare(releaseTags[0], prereleaseTags[0]) === 1
+    ) {
+      tags = releaseTags;
+    } else {
+      tags = prereleaseTags;
+    }
   }
 
   tags = tags.filter((x) => x);
@@ -305,7 +475,7 @@ function determineLatestTag(options: LatestTagOptions): {
   if (tags.length > 0) {
     latestTag = tags[0];
   } else {
-    const initial = `${prefix}v${major ?? 0}.0.0`;
+    const initial = `${prefix}v${major ?? 0}.${minor ?? 0}.0`;
     latestTag = prerelease ? `${initial}-${prerelease}.0` : initial;
     isFirstRelease = true;
   }
@@ -318,8 +488,17 @@ function determineLatestTag(options: LatestTagOptions): {
 
   // remove "v" prefix (if exists)
   if (latestVersion.startsWith("v")) {
-    latestVersion = latestVersion.substr(1);
+    latestVersion = latestVersion.substring(1);
   }
 
   return { latestVersion, latestTag, isFirstRelease };
+}
+
+function isReleaseType(nextVersion: string): nextVersion is ReleaseType {
+  // We are not recognizing all of them yet. That's fine for now.
+  return !!nextVersion.match(/^(major|minor|patch)$/);
+}
+
+function isFullVersionString(nextVersion: string) {
+  return nextVersion.match(/^\d+\.\d+\.\d+(-[^\s]+)?$/);
 }

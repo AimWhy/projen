@@ -21,6 +21,9 @@ export interface Cache {
 
   /** Defines when to save the cache, based on the status of the job (Default: Job Success). */
   readonly when?: CacheWhen;
+
+  /** Use cache:fallback_keys to specify a list of keys to try to restore cache from if there is no cache found for the cache:key. Caches are retrieved in the order specified in the fallback_keys section. */
+  readonly fallbackKeys?: string[];
 }
 
 /**
@@ -71,8 +74,10 @@ export interface Default {
   readonly artifacts?: Artifacts;
   /* Defines scripts that should run *before* all jobs. Can be overriden by the job level `afterScript`. */
   readonly beforeScript?: string[];
-  /* A list of files and directories to cache between jobs. You can only use paths that are in the local working copy. */
-  readonly cache?: Cache;
+  /* A list of cache definitions (max. 4) with the files and directories to cache between jobs. You can only use paths that are in the local working copy. */
+  readonly cache?: Cache[];
+  /** Specifies the default ID tokens (JSON Web Tokens) that are used for CI/CD authentication to use globally for all jobs. */
+  readonly idTokens?: Record<string, IDToken>;
   /* Specifies the default docker image to use globally for all jobs. */
   readonly image?: Image;
   /* If a job should be canceled when a newer pipeline starts before the job completes (Default: false).*/
@@ -112,17 +117,30 @@ export interface Artifacts {
 }
 
 /**
+ * Code coverage report interface
+ * @link https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportscoverage_report
+ */
+export interface CoverageReport {
+  readonly coverageFormat: string;
+  readonly path: string;
+}
+
+/**
  * Reports will be uploaded as artifacts, and often displayed in the Gitlab UI, such as in
  * Merge Requests.
  * @see https://docs.gitlab.com/ee/ci/yaml/#artifactsreports
  */
 export interface Reports {
-  /** Path for file(s) that should be parsed as Cobertura XML coverage report*/
+  /** Path for file(s) that should be parsed as Cobertura XML coverage report
+   * @deprecated per {@link https://docs.gitlab.com/ee/update/deprecations.html#artifactsreportscobertura-keyword} use {@link coverageReport} instead
+   */
   readonly cobertura?: string[];
   /** Path to file or list of files with code quality report(s) (such as Code Climate).*/
   readonly codequality?: string[];
   /** Path to file or list of files with Container scanning vulnerabilities report(s).*/
   readonly containerScanning?: string[];
+  /** Code coverage report information */
+  readonly coverageReport?: CoverageReport;
   /** Path to file or list of files with DAST vulnerabilities report(s).*/
   readonly dast?: string[];
   /** Path to file or list of files with Dependency scanning vulnerabilities report(s).*/
@@ -149,6 +167,15 @@ export interface Reports {
   readonly secretDetection?: string[];
   /** Path to file or list of files with terraform plan(s).*/
   readonly terraform?: string[];
+}
+
+/**
+ * id_tokens Definition.
+ * @see https://docs.gitlab.com/ee/ci/yaml/#id_tokens
+ */
+export interface IDToken {
+  /** The required aud sub-keyword is used to configure the aud claim for the JWT. */
+  aud: string[] | string;
 }
 
 /**
@@ -187,6 +214,20 @@ export interface Service {
   readonly entrypoint?: string[];
   /** Full name of the image that should be used. It should contain the Registry part if needed.*/
   readonly name: string;
+  /** The pull policy that the runner uses to fetch the Docker image */
+  readonly pullPolicy?: PullPolicy[];
+  /** Additional environment variables that are passed exclusively to the service.. */
+  readonly variables?: Record<string, string>;
+}
+
+/**
+ * Describes the conditions for when to pull an image.
+ * @see https://docs.gitlab.com/ee/ci/yaml/#servicepull_policy
+ */
+export enum PullPolicy {
+  ALWAYS = "always",
+  NEVER = "never",
+  IF_NOT_PRESENT = "if-not-present",
 }
 
 /**
@@ -224,10 +265,12 @@ export interface IncludeRule {
   readonly exists?: string[];
   /* Clauses to specify when to add a job to a pipeline.*/
   readonly if?: string;
+  /* Specify to update a job’s needs for specific conditions. */
+  readonly needs?: string[];
   /* Execute scripts after a waiting period written in natural language (Ex. one hour, 3600 seconds, 60 minutes). */
   readonly startIn?: string;
   /* Use variables in rules to define variables for specific conditions. */
-  readonly variables?: Record<string, number | string>;
+  readonly variables?: Record<string, string>;
   /* Conditions for when to run the job. Defaults to 'on_success' */
   readonly when?: JobWhen;
 }
@@ -268,8 +311,8 @@ export interface Job {
   readonly artifacts?: Artifacts;
   /* Defines scripts that should run *before* the job. */
   readonly beforeScript?: string[];
-  /* A list of files and directories to cache between jobs. You can only use paths that are in the local working copy. */
-  readonly cache?: Cache;
+  /* A list of cache definitions (max. 4) with the files and directories to cache between jobs. You can only use paths that are in the local working copy. */
+  readonly cache?: Cache[];
   /** Must be a regular expression, optionally but recommended to be quoted, and must be surrounded with '/'. Example: '/Code coverage: \d+\.\d+/'*/
   readonly coverage?: string;
   /** Specify a list of job names from earlier stages from which artifacts should be loaded. By default, all previous artifacts are passed. Use an empty array to skip downloading artifacts.*/
@@ -280,6 +323,8 @@ export interface Job {
   readonly except?: string[] | Filter;
   /** The name of one or more jobs to inherit configuration from.*/
   readonly extends?: string[];
+  /** Configurable ID tokens (JSON Web Tokens) that are used for CI/CD authentication */
+  readonly idTokens?: Record<string, IDToken>;
   /* Specifies the default docker image to used for the job. */
   readonly image?: Image;
   /** Controls inheritance of globally-defined defaults and variables. Boolean values control inheritance of all default: or variables: keywords. To inherit only a subset of default: or variables: keywords, specify what you wish to inherit. Anything not listed is not inherited.*/
@@ -317,7 +362,7 @@ export interface Job {
   /** Trigger allows you to define downstream pipeline trigger. When a job created from trigger definition is started by GitLab, a downstream pipeline gets created. Read more: https://docs.gitlab.com/ee/ci/yaml/README.html#trigger*/
   readonly trigger?: Trigger | string;
   /** Configurable values that are passed to the Job. */
-  readonly variables?: Record<string, number | string>;
+  readonly variables?: Record<string, string>;
   /** Describes the conditions for when to run the job. Defaults to 'on_success'. */
   readonly when?: JobWhen;
 }
@@ -586,6 +631,8 @@ export interface VariableConfig {
  * @see https://docs.gitlab.com/ee/ci/yaml/#workflow
  */
 export interface Workflow {
+  /** You can use name to define a name for pipelines. */
+  readonly name?: string;
   /** Used to control whether or not a whole pipeline is created. */
   readonly rules?: WorkflowRule[];
 }
@@ -604,7 +651,7 @@ export interface WorkflowRule {
   /* Use variables in rules to define variables for specific conditions. */
   readonly variables?: Record<string, number | string>;
   /* Conditions for when to run the job. Defaults to 'on_success' */
-  readonly when?: JobWhen;
+  readonly when?: WorkflowWhen;
 }
 
 /**

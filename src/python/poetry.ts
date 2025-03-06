@@ -1,3 +1,8 @@
+import * as TOML from "@iarna/toml";
+import { IPythonDeps } from "./python-deps";
+import { IPythonEnv } from "./python-env";
+import { IPythonPackaging, PythonPackagingOptions } from "./python-packaging";
+import { PythonExecutableOptions } from "./python-project";
 import { Component } from "../component";
 import { DependencyType } from "../dependencies";
 import { Project } from "../project";
@@ -5,9 +10,10 @@ import { Task } from "../task";
 import { TaskRuntime } from "../task-runtime";
 import { TomlFile } from "../toml";
 import { decamelizeKeysRecursively, exec, execOrUndefined } from "../util";
-import { IPythonDeps } from "./python-deps";
-import { IPythonEnv } from "./python-env";
-import { IPythonPackaging, PythonPackagingOptions } from "./python-packaging";
+
+export interface PoetryOptions
+  extends PythonPackagingOptions,
+    PythonExecutableOptions {}
 
 /**
  * Manage project dependencies, virtual environments, and packaging through the
@@ -17,23 +23,56 @@ export class Poetry
   extends Component
   implements IPythonDeps, IPythonEnv, IPythonPackaging
 {
+  /**
+   * Task for updating the lockfile and installing project dependencies.
+   */
   public readonly installTask: Task;
+
+  /**
+   * Task for installing dependencies according to the existing lockfile.
+   */
+  public readonly installCiTask: Task;
+
+  /**
+   * Task for publishing the package to a package repository.
+   */
   public readonly publishTask: Task;
 
   /**
-   * A task that uploads the package to the Test PyPI repository.
+   * Task for publishing the package to the Test PyPI repository for testing purposes.
    */
   public readonly publishTestTask: Task;
 
-  constructor(project: Project, options: PythonPackagingOptions) {
+  /**
+   * Path to the Python executable to use.
+   */
+  private readonly pythonExec: string;
+
+  /**
+   * Represents the configuration of the `pyproject.toml` file for a Poetry project.
+   * This includes package metadata, dependencies, and Poetry-specific settings.
+   */
+  private readonly pyProject: PoetryPyproject;
+
+  constructor(project: Project, options: PoetryOptions) {
     super(project);
+    this.pythonExec = options.pythonExec ?? "python";
 
     this.installTask = project.addTask("install", {
-      description: "Install and upgrade dependencies",
+      description: "Install dependencies and update lockfile",
       exec: "poetry update",
     });
 
-    this.project.tasks.addEnvironment("VIRTUAL_ENV", "$(poetry env info -p)");
+    this.installCiTask = project.addTask("install:ci", {
+      description: "Install dependencies with frozen lockfile",
+      exec: "poetry check --lock && poetry install",
+    });
+
+    this.project.tasks.addEnvironment(
+      "VIRTUAL_ENV",
+      // Create .venv on the first run if it doesn't already exist
+      "$(poetry env info -p || poetry run poetry env info -p)"
+    );
     this.project.tasks.addEnvironment(
       "PATH",
       "$(echo $(poetry env info -p)/bin:$PATH)"
@@ -51,7 +90,7 @@ export class Poetry
       exec: "poetry publish",
     });
 
-    new PoetryPyproject(project, {
+    this.pyProject = new PoetryPyproject(project, {
       name: project.name,
       version: options.version,
       description: options.description ?? "",
@@ -84,24 +123,72 @@ export class Poetry
         pythonDefined = true;
       }
       if (pkg.type === DependencyType.RUNTIME) {
-        dependencies[pkg.name] = pkg.version;
+        dependencies[pkg.name] = pkg.version ?? "*";
       }
     }
     if (!pythonDefined) {
-      // Python version must be defined for poetry projects. Default to ^3.6.
-      dependencies.python = "^3.6";
+      // Python version must be defined for poetry projects. Default to ^3.8.
+      dependencies.python = "^3.8";
     }
-    return dependencies;
+    return this.permitDepsWithTomlInlineTables(dependencies);
   }
 
   private synthDevDependencies() {
     const dependencies: { [key: string]: any } = {};
     for (const pkg of this.project.deps.all) {
-      if ([DependencyType.DEVENV].includes(pkg.type)) {
-        dependencies[pkg.name] = pkg.version;
+      if ([DependencyType.DEVENV, DependencyType.TEST].includes(pkg.type)) {
+        dependencies[pkg.name] = pkg.version ?? "*";
       }
     }
-    return dependencies;
+    return this.permitDepsWithTomlInlineTables(dependencies);
+  }
+
+  /**
+   * Parses dependency values that may include TOML inline tables, converting them into JavaScript objects.
+   * If a dependency value cannot be parsed as a TOML inline table (indicating it is a plain SemVer string),
+   * it is left unchanged. This allows to support the full range of Poetry's dependency specification.
+   * @see https://python-poetry.org/docs/dependency-specification/
+   * @see https://toml.io/en/v1.0.0#inline-table
+   *
+   * @example
+   * // Given a `dependencies` object like this:
+   * const dependencies = {
+   *   "mypackage": "{ version = '1.2.3', extras = ['extra1', 'extra2'] }",
+   *   "anotherpackage": "^2.3.4"
+   * };
+   * // After parsing, the resulting object would be:
+   * {
+   *   "mypackage": {
+   *     version: "1.2.3",
+   *     extras: ["extra1", "extra2"]
+   *   },
+   *   "anotherpackage": "^2.3.4"
+   * }
+   * // Note: The value of `anotherpackage` remains unchanged as it is a plain SemVer string.
+   *
+   * @param dependencies An object where each key is a dependency name and each value is a string that might be
+   * either a SemVer string or a TOML inline table string.
+   * @returns A new object where each key is a dependency name and each value is either the original SemVer string
+   * or the parsed JavaScript object representation of the TOML inline table.
+   */
+  private permitDepsWithTomlInlineTables(dependencies: {
+    [key: string]: string;
+  }) {
+    const parseTomlInlineTable = (dependencyValue: string) => {
+      try {
+        // Attempt parsing the `dependencyValue` as a TOML inline table
+        return TOML.parse(`dependencyKey = ${dependencyValue}`).dependencyKey;
+      } catch {
+        // If parsing fails, treat the `dependencyValue` as a plain SemVer string
+        return dependencyValue;
+      }
+    };
+
+    return Object.fromEntries(
+      Object.entries(dependencies).map(([dependencyKey, dependencyValue]) => {
+        return [dependencyKey, parseTomlInlineTable(dependencyValue)];
+      })
+    );
   }
 
   /**
@@ -140,7 +227,7 @@ export class Poetry
     });
     if (!envPath) {
       this.project.logger.info("Setting up a virtual environment...");
-      exec("poetry env use python", { cwd: this.project.outdir });
+      exec(`poetry env use ${this.pythonExec}`, { cwd: this.project.outdir });
       envPath = execOrUndefined("poetry env info -p", {
         cwd: this.project.outdir,
       });
@@ -156,7 +243,12 @@ export class Poetry
   public installDependencies() {
     this.project.logger.info("Installing dependencies...");
     const runtime = new TaskRuntime(this.project.outdir);
-    runtime.runTask(this.installTask.name);
+    // If the pyproject.toml file has changed, update the lockfile prior to installation
+    if (this.pyProject.file.changed) {
+      runtime.runTask(this.installTask.name);
+    } else {
+      runtime.runTask(this.installCiTask.name);
+    }
   }
 }
 
@@ -274,6 +366,13 @@ export interface PoetryPyprojectOptionsWithoutDeps {
    * E.g. "Bug Tracker"
    */
   readonly urls?: { [key: string]: string };
+  /**
+   * Package mode (optional).
+   * @see https://python-poetry.org/docs/pyproject/#package-mode
+   * @default true
+   * @example false
+   */
+  readonly packageMode?: boolean;
 }
 
 /**
@@ -310,23 +409,32 @@ export class PoetryPyproject extends Component {
   constructor(project: Project, options: PoetryPyprojectOptions) {
     super(project);
 
-    const decamelisedOptions = decamelizeKeysRecursively(options, {
+    const { dependencies, devDependencies, ...otherOptions } = options;
+    const decamelizedOptions = decamelizeKeysRecursively(otherOptions, {
       separator: "-",
     });
 
-    this.file = new TomlFile(project, "pyproject.toml", {
-      omitEmpty: false,
-      obj: {
-        "build-system": {
-          requires: ["poetry_core>=1.0.0"],
-          "build-backend": "poetry.core.masonry.api",
-        },
-        tool: {
-          poetry: {
-            ...decamelisedOptions,
+    const tomlStructure: any = {
+      tool: {
+        poetry: {
+          ...decamelizedOptions,
+          dependencies: dependencies,
+          group: {
+            dev: {
+              dependencies: devDependencies,
+            },
           },
         },
       },
+      "build-system": {
+        requires: ["poetry-core"],
+        "build-backend": "poetry.core.masonry.api",
+      },
+    };
+
+    this.file = new TomlFile(project, "pyproject.toml", {
+      omitEmpty: false,
+      obj: tomlStructure,
     });
   }
 }

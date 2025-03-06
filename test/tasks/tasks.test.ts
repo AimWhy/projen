@@ -236,6 +236,28 @@ test("env() can be used to add environment variables", () => {
   });
 });
 
+test(".envVars returns all environment variables in the task level", () => {
+  // GIVEN
+  const p = new TestProject();
+  const t = p.addTask("my-task", {
+    env: {
+      INITIAL: "123",
+      ENV: "456",
+    },
+  });
+
+  // WHEN
+  t.env("FOO", "BAR");
+  t.env("HELLO", "world");
+
+  expect(t.envVars).toStrictEqual({
+    INITIAL: "123",
+    ENV: "456",
+    FOO: "BAR",
+    HELLO: "world",
+  });
+});
+
 test(".steps can be used to list all steps in the current task", () => {
   // GIVEN
   const p = new TestProject();
@@ -260,6 +282,117 @@ test(".steps can be used to list all steps in the current task", () => {
   ] as TaskStep[]);
 });
 
+test("updateStep() can be used to replace a specific step", () => {
+  // GIVEN
+  const p = new TestProject();
+  const t0 = p.addTask("your");
+  const t = p.addTask("my");
+  t.exec("step1");
+  t.exec("step2");
+  t.exec("step3");
+  t.spawn(t0);
+  t.exec("step4");
+
+  // WHEN
+  t.updateStep(2, { exec: "edited" });
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      your: {
+        name: "your",
+      },
+      my: {
+        name: "my",
+        steps: [
+          { exec: "step1" },
+          { exec: "step2" },
+          { exec: "edited" },
+          { spawn: "your" },
+          { exec: "step4" },
+        ],
+      },
+    },
+  });
+});
+
+test.each([[2], [-2]])(
+  "insertStep(%p) can be used to insert a step at a specific location",
+  (index) => {
+    // GIVEN
+    const p = new TestProject();
+    const t = p.addTask("my");
+    t.exec("step1");
+    t.exec("step2");
+    t.exec("step3");
+    t.exec("step4");
+
+    t.insertStep(index, { exec: "step2.5" });
+
+    // THEN
+    expectManifest(p, {
+      tasks: {
+        my: {
+          name: "my",
+          steps: [
+            { exec: "step1" },
+            { exec: "step2" },
+            { exec: "step2.5" },
+            { exec: "step3" },
+            { exec: "step4" },
+          ],
+        },
+      },
+    });
+  }
+);
+
+test("insertStep throws if the index is out of bounds", () => {
+  // GIVEN
+  const p = new TestProject();
+  const t = p.addTask("my");
+  t.exec("step1");
+  t.exec("step2");
+  t.exec("step3");
+  t.exec("step4");
+
+  expect(() => t.insertStep(-5, { exec: "asdf" })).toThrow(/out of bounds/);
+  expect(() => t.insertStep(5, { exec: "asdf" })).toThrow(/out of bounds/);
+});
+
+test("removeStep() can be used to remove a specific step", () => {
+  // GIVEN
+  const p = new TestProject();
+  const t0 = p.addTask("your");
+  const t = p.addTask("my");
+  t.exec("step1");
+  t.exec("step2");
+  t.exec("step3");
+  t.spawn(t0);
+  t.exec("step4");
+
+  // WHEN
+  t.removeStep(2);
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      your: {
+        name: "your",
+      },
+      my: {
+        name: "my",
+        steps: [
+          { exec: "step1" },
+          { exec: "step2" },
+          { spawn: "your" },
+          { exec: "step4" },
+        ],
+      },
+    },
+  });
+});
+
 test('"condition" can be used to define a command that will determine if a task should be skipped', () => {
   // GIVEN
   const p = new TestProject();
@@ -274,6 +407,48 @@ test('"condition" can be used to define a command that will determine if a task 
       foo: {
         name: "foo",
         condition: "false",
+        steps: [{ exec: "foo bar" }],
+      },
+    },
+  });
+});
+
+test('"addCondition" can be added after task initialized', () => {
+  // GIVEN
+  const p = new TestProject();
+  const t = p.addTask("foo", {
+    condition: undefined,
+    exec: "foo bar",
+  });
+  t.addCondition("false");
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      foo: {
+        name: "foo",
+        condition: "false",
+        steps: [{ exec: "foo bar" }],
+      },
+    },
+  });
+});
+
+test('"addCondition" can append additional condition', () => {
+  // GIVEN
+  const p = new TestProject();
+  const t = p.addTask("foo", {
+    condition: "a",
+    exec: "foo bar",
+  });
+  t.addCondition("b");
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      foo: {
+        name: "foo",
+        condition: "a && b",
         steps: [{ exec: "foo bar" }],
       },
     },
@@ -353,6 +528,57 @@ test("it is possible to edit the description", () => {
   const files = synthSnapshot(p);
   expect(files[".projen/tasks.json"].tasks.t1.description).toBe("hello");
   expect(files[".projen/tasks.json"].tasks.t2.description).toBe("world");
+});
+
+test("steps can receive args", () => {
+  const p = new TestProject();
+
+  // WHEN
+  const hello = p.addTask("hello");
+  const world = p.addTask("world", {
+    exec: "echo $@ world",
+    receiveArgs: true,
+  });
+
+  hello.exec("echo hello", { receiveArgs: true });
+  hello.spawn(world, { receiveArgs: true });
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      hello: {
+        name: "hello",
+        steps: [
+          { exec: "echo hello", receiveArgs: true },
+          { spawn: "world", receiveArgs: true },
+        ],
+      },
+      world: {
+        name: "world",
+        steps: [{ exec: "echo $@ world", receiveArgs: true }],
+      },
+    },
+  });
+});
+
+test("allows setting the cwd for the task", () => {
+  const p = new TestProject();
+  const t = p.addTask("t", {
+    cwd: "foo",
+  });
+
+  // WHEN
+  t.cwd = "bar";
+
+  // THEN
+  expectManifest(p, {
+    tasks: {
+      t: {
+        name: "t",
+        cwd: "bar",
+      },
+    },
+  });
 });
 
 function expectManifest(p: Project, toStrictEqual: TasksManifest) {

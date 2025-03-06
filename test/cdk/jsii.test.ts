@@ -1,6 +1,22 @@
 import * as yaml from "yaml";
+import { javascript } from "../../src";
 import { JsiiProject } from "../../src/cdk";
 import { synthSnapshot } from "../util";
+
+describe("JsiiProject with default settings", () => {
+  it("synthesizes", () => {
+    const project = new JsiiProject({
+      authorAddress: "hello@hello.com",
+      repositoryUrl: "https://github.com/foo/bar.git",
+      author: "My Name",
+      name: "project",
+      defaultReleaseBranch: "main",
+    });
+
+    const output = synthSnapshot(project);
+    expect(output).toMatchSnapshot();
+  });
+});
 
 describe("author", () => {
   test("authorEmail and authorAddress can be the same value", () => {
@@ -273,6 +289,36 @@ describe("publish to go", () => {
     );
   });
 
+  test("workflowBootstrap steps", () => {
+    const workflowBootstrapStep = {
+      id: "test_setup",
+      env: {
+        TEST: "TEST_VALUE",
+      },
+      name: "Workflow setup step",
+    };
+    const project = new JsiiProject({
+      authorAddress: "https://foo.bar",
+      authorUrl: "https://foo.bar",
+      repositoryUrl: "https://github.com/foo/bar.git",
+      author: "My Name",
+      name: "testproject",
+      defaultReleaseBranch: "main",
+      releaseToNpm: true,
+      publishTasks: true,
+      workflowBootstrapSteps: [workflowBootstrapStep],
+    });
+
+    const output = synthSnapshot(project);
+    const build = yaml.parse(output[".github/workflows/build.yml"]);
+    const release = yaml.parse(output[".github/workflows/release.yml"]);
+    expect(build.jobs.build.steps).toContainEqual(workflowBootstrapStep);
+    expect(release.jobs.release.steps).toContainEqual(workflowBootstrapStep);
+    expect(release.jobs.release_npm.steps).toContainEqual(
+      workflowBootstrapStep
+    );
+  });
+
   test("customizations", () => {
     const project = new JsiiProject({
       authorAddress: "https://foo.bar",
@@ -282,12 +328,12 @@ describe("publish to go", () => {
       name: "testproject",
       publishToGo: {
         moduleName: "github.com/foo/bar",
-
+        packageName: "baz",
+        versionSuffix: "-dev",
         gitBranch: "custom-branch",
         gitCommitMessage: "custom commit message",
         gitUserEmail: "custom@email.com",
         gitUserName: "custom user",
-        githubRepo: "github.com/foo/bar",
         githubTokenSecret: "CUSTOM_SECRET",
       },
       defaultReleaseBranch: "master",
@@ -297,6 +343,8 @@ describe("publish to go", () => {
     const output = synthSnapshot(project);
     expect(output["package.json"].jsii.targets.go).toStrictEqual({
       moduleName: "github.com/foo/bar",
+      packageName: "baz",
+      versionSuffix: "-dev",
     });
     expect(output[".github/workflows/release.yml"]).toMatchSnapshot();
     expect(output["package.json"].jsii.excludeTypescript).toStrictEqual([
@@ -400,6 +448,41 @@ describe("docgen", () => {
   });
 });
 
+describe("compile options", () => {
+  test("be default, assembly is not compressed", () => {
+    const project = new JsiiProject({
+      author: "My name",
+      name: "testproject",
+      authorAddress: "https://foo.bar",
+      defaultReleaseBranch: "main",
+      repositoryUrl: "https://github.com/foo/bar.git",
+    });
+
+    const output = synthSnapshot(project);
+    expect(
+      output[".projen/tasks.json"].tasks.compile.steps[0].exec
+    ).toStrictEqual("jsii --silence-warnings=reserved-word");
+  });
+
+  test("assembly can be compressed", () => {
+    const project = new JsiiProject({
+      author: "My name",
+      name: "testproject",
+      authorAddress: "https://foo.bar",
+      defaultReleaseBranch: "main",
+      repositoryUrl: "https://github.com/foo/bar.git",
+      compressAssembly: true,
+    });
+
+    const output = synthSnapshot(project);
+    expect(
+      output[".projen/tasks.json"].tasks.compile.steps[0].exec
+    ).toStrictEqual(
+      "jsii --silence-warnings=reserved-word --compress-assembly"
+    );
+  });
+});
+
 describe("language bindings", () => {
   const project = new JsiiProject({
     author: "My name",
@@ -451,9 +534,9 @@ describe("language bindings", () => {
     }
   );
 
-  test("package-all creates all bindings", () => {
-    expect(tasks["package-all"]).toBeDefined();
-    expect(tasks["package-all"]).toMatchSnapshot();
+  test("package creates all bindings", () => {
+    expect(tasks.package).toBeDefined();
+    expect(tasks.package).toMatchSnapshot();
   });
 
   test.each(["pypi", "nuget", "npm", "maven", "golang"])(
@@ -512,6 +595,201 @@ describe("workflows use global workflowRunsOn option", () => {
       expect(release).toHaveProperty(
         `jobs.release_${language}.runs-on`,
         EXPECTED_RUNS_ON
+      );
+    }
+  );
+});
+
+describe("workflows use global workflowRunsOn option - runner group extended", () => {
+  const project = new JsiiProject({
+    author: "My name",
+    name: "testproject",
+    authorAddress: "https://foo.bar",
+    defaultReleaseBranch: "main",
+    repositoryUrl: "https://github.com/foo/bar.git",
+    publishToGo: { moduleName: "github.com/foo/bar" },
+    publishToMaven: {
+      javaPackage: "io.github.cdklabs.watchful",
+      mavenGroupId: "io.github.cdklabs",
+      mavenArtifactId: "cdk-watchful",
+    },
+    publishToNuget: {
+      dotNetNamespace: "DotNet.Namespace",
+      packageId: "PackageId",
+    },
+    publishToPypi: { distName: "dist-name", module: "module-name" },
+    workflowRunsOnGroup: {
+      group: "Default",
+      labels: ["self-hosted", "linux", "x64"],
+    },
+    depsUpgradeOptions: {
+      workflowOptions: {
+        runsOnGroup: {
+          group: "Default",
+          labels: ["self-hosted", "linux", "x64"],
+        },
+      },
+    },
+    githubOptions: {
+      pullRequestLintOptions: {
+        runsOnGroup: {
+          group: "Default",
+          labels: ["self-hosted", "linux", "x64"],
+        },
+      },
+    },
+  });
+
+  const output = synthSnapshot(project);
+  const build = yaml.parse(output[".github/workflows/build.yml"]);
+  const release = yaml.parse(output[".github/workflows/release.yml"]);
+  const upgrade = yaml.parse(output[".github/workflows/upgrade-main.yml"]);
+  const prLint = yaml.parse(output[".github/workflows/pull-request-lint.yml"]);
+
+  const EXPECTED_RUNS_ON = JSON.parse(
+    '{"group":"Default","labels":["self-hosted", "linux", "x64"]}'
+  );
+
+  expect(build).toHaveProperty("jobs.build.runs-on.group", "Default");
+  expect(build).toHaveProperty("jobs.build.runs-on.labels", [
+    "self-hosted",
+    "linux",
+    "x64",
+  ]);
+  expect(build).toHaveProperty("jobs.self-mutation.runs-on.group", "Default");
+  expect(build).toHaveProperty("jobs.self-mutation.runs-on.labels", [
+    "self-hosted",
+    "linux",
+    "x64",
+  ]);
+
+  expect(upgrade).toHaveProperty("jobs.upgrade.runs-on.group", "Default");
+  expect(upgrade).toHaveProperty("jobs.upgrade.runs-on.labels", [
+    "self-hosted",
+    "linux",
+    "x64",
+  ]);
+  expect(upgrade).toHaveProperty("jobs.pr.runs-on.group", "Default");
+  expect(upgrade).toHaveProperty("jobs.pr.runs-on.labels", [
+    "self-hosted",
+    "linux",
+    "x64",
+  ]);
+
+  expect(prLint).toHaveProperty("jobs.validate.runs-on.group", "Default");
+  expect(prLint).toHaveProperty("jobs.validate.runs-on.labels", [
+    "self-hosted",
+    "linux",
+    "x64",
+  ]);
+
+  test.each(["js", "java", "python", "dotnet", "go"])(
+    "snapshot %s",
+    (language) => {
+      expect(build).toHaveProperty(
+        `jobs.package-${language}.runs-on`,
+        EXPECTED_RUNS_ON
+      );
+    }
+  );
+
+  test.each(["pypi", "nuget", "npm", "maven", "golang"])(
+    "release workflow includes release_%s job",
+    (language) => {
+      expect(release).toHaveProperty(
+        `jobs.release_${language}.runs-on`,
+        EXPECTED_RUNS_ON
+      );
+    }
+  );
+});
+
+describe("workflows use global workflowContainerImage option", () => {
+  const project = new JsiiProject({
+    author: "My name",
+    name: "testproject",
+    authorAddress: "https://foo.bar",
+    defaultReleaseBranch: "main",
+    repositoryUrl: "https://github.com/foo/bar.git",
+    publishToGo: { moduleName: "github.com/foo/bar" },
+    publishToMaven: {
+      javaPackage: "io.github.cdklabs.watchful",
+      mavenGroupId: "io.github.cdklabs",
+      mavenArtifactId: "cdk-watchful",
+    },
+    publishToNuget: {
+      dotNetNamespace: "DotNet.Namespace",
+      packageId: "PackageId",
+    },
+    publishToPypi: { distName: "dist-name", module: "module-name" },
+    workflowContainerImage: "node:16",
+  });
+
+  const output = synthSnapshot(project);
+  const build = yaml.parse(output[".github/workflows/build.yml"]);
+  const release = yaml.parse(output[".github/workflows/release.yml"]);
+
+  const EXPECTED_CONTAINER = { image: "node:16" };
+
+  expect(build).toHaveProperty("jobs.build.container", EXPECTED_CONTAINER);
+
+  test.each(["js", "java", "python", "dotnet", "go"])(
+    "snapshot %s",
+    (language) => {
+      expect(build).toHaveProperty(
+        `jobs.package-${language}.container`,
+        EXPECTED_CONTAINER
+      );
+    }
+  );
+
+  test.each(["pypi", "nuget", "npm", "maven", "golang"])(
+    "release workflow includes release_%s job",
+    (language) => {
+      expect(release).toHaveProperty(
+        `jobs.release_${language}.container`,
+        EXPECTED_CONTAINER
+      );
+    }
+  );
+});
+
+describe("release workflow use packageManager option", () => {
+  const project = new JsiiProject({
+    author: "My name",
+    name: "testproject",
+    authorAddress: "https://foo.bar",
+    defaultReleaseBranch: "main",
+    repositoryUrl: "https://github.com/foo/bar.git",
+    publishToGo: { moduleName: "github.com/foo/bar" },
+    publishToMaven: {
+      javaPackage: "io.github.cdklabs.watchful",
+      mavenGroupId: "io.github.cdklabs",
+      mavenArtifactId: "cdk-watchful",
+    },
+    publishToNuget: {
+      dotNetNamespace: "DotNet.Namespace",
+      packageId: "PackageId",
+    },
+    publishToPypi: { distName: "dist-name", module: "module-name" },
+    packageManager: javascript.NodePackageManager.PNPM,
+  });
+
+  const output = synthSnapshot(project);
+  const release = yaml.parse(output[".github/workflows/release.yml"]);
+
+  const EXPECTED_STEP = "pnpm/action-setup";
+
+  test.each(["pypi", "nuget", "npm", "maven", "golang"])(
+    "release workflow includes release_%s job have pnpm action setup step",
+    (language) => {
+      expect(release).toHaveProperty(
+        `jobs.release_${language}.steps`,
+        expect.arrayContaining([
+          expect.objectContaining({
+            uses: expect.stringContaining(EXPECTED_STEP),
+          }),
+        ])
       );
     }
   );

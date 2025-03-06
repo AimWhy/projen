@@ -81,6 +81,63 @@ export interface TaskStepOptions {
    * @default - determined by the task
    */
   readonly cwd?: string;
+
+  /**
+   * A shell command which determines if the this step should be executed. If
+   * the program exits with a zero exit code, the step will be executed. A non-zero
+   * code means the step will be skipped (subsequent task steps will still be evaluated/executed).
+   */
+  readonly condition?: string;
+
+  /**
+   * Should this step receive args passed to the task.
+   *
+   * If `true`, args are passed through at the end of the `exec` shell command.\
+   * The position of the args can be changed by including the marker `$@` inside the command string.
+   *
+   * If the marker is explicitly double-quoted ("$@") arguments will be wrapped in single quotes, approximating
+   * the whitespace preserving behavior of bash variable expansion.
+   *
+   * If the step spawns a subtask, args are passed to the subtask.
+   * The subtask must define steps receiving args for this to have any effect.
+   *
+   * @example task.exec("echo Hello $@ World!", { receiveArgs: true });
+   *
+   * @default false
+   */
+  readonly receiveArgs?: boolean;
+
+  /**
+   * A list of fixed arguments always passed to the step.
+   *
+   * Useful to re-use existing tasks without having to re-define the whole task.\
+   * Fixed args are always passed to the step, even if `receiveArgs` is `false`
+   * and are always passed before any args the task is called with.
+   *
+   * If the step executes a shell commands, args are passed through at the end of the `exec` shell command.\
+   * The position of the args can be changed by including the marker `$@` inside the command string.
+   *
+   * If the step spawns a subtask, args are passed to the subtask.
+   * The subtask must define steps receiving args for this to have any effect.
+   *
+   * If the step calls a builtin script, args are passed to the script.
+   * It is up to the script to use or discard the arguments.
+   *
+   * @example task.spawn("deploy", { args: ["--force"] });
+   *
+   * @default - no arguments are passed to the step
+   */
+  readonly args?: string[];
+
+  /**
+   * Defines environment variables for the execution of this step (`exec` and `builtin` only).
+   * Values in this map can be simple, literal values or shell expressions that will be evaluated at runtime e.g. `$(echo "foo")`.
+   *
+   * @example { "foo": "bar", "boo": "$(echo baz)" }
+   *
+   * @default - no environment variables defined in step
+   */
+  readonly env?: { [name: string]: string };
 }
 
 /**

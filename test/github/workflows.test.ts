@@ -26,6 +26,66 @@ test("adding empty workflow", () => {
   expect(workflows[".github/workflows/my-workflow.yml"]).toMatchSnapshot();
 });
 
+test("setting runName", () => {
+  // GIVEN
+  const p = new TestProject();
+  const wf = p.github!.addWorkflow("run-name");
+
+  // WHEN
+  wf.runName = "This is a custom run-name";
+
+  // THEN
+  const workflows = synthWorkflows(p);
+  expect(workflows[".github/workflows/run-name.yml"]).toMatchSnapshot();
+});
+
+test("workflow triggers", () => {
+  // GIVEN
+  const p = new TestProject();
+  const wf = p.github!.addWorkflow("triggers");
+
+  // WHEN
+  wf.on({
+    schedule: [{ cron: "5 4 * * *" }],
+    workflowDispatch: {},
+    repositoryDispatch: {},
+    workflowCall: {},
+    branchProtectionRule: {},
+    checkRun: {},
+    checkSuite: {},
+    create: {},
+    delete: {},
+    deployment: {},
+    deploymentStatus: {},
+    discussion: {},
+    discussionComment: {},
+    fork: {},
+    gollum: {},
+    issueComment: {},
+    issues: {},
+    label: {},
+    mergeGroup: {
+      branches: ["main"],
+    },
+    milestone: {},
+    pageBuild: {},
+    pullRequest: {},
+    pullRequestReview: {},
+    pullRequestReviewComment: {},
+    pullRequestTarget: {},
+    push: {},
+    registryPackage: {},
+    release: {},
+    status: {},
+    watch: {},
+    workflowRun: {},
+  });
+
+  // THEN
+  const workflows = synthWorkflows(p);
+  expect(workflows[".github/workflows/triggers.yml"]).toMatchSnapshot();
+});
+
 test("throws when adding workflow with existing name", () => {
   // GIVEN
   const p = new TestProject({
@@ -34,7 +94,7 @@ test("throws when adding workflow with existing name", () => {
 
   // THEN
   expect(() => p.github?.addWorkflow("stale")).toThrow(
-    /there is already a file under/
+    /There is already a Construct with name 'GithubWorkflow#stale' in TestProject/
   );
 });
 

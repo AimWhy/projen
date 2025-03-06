@@ -1,7 +1,7 @@
-import { existsSync, writeFileSync } from "fs";
-import { resolve } from "path";
-import { Component } from "../component";
+import { existsSync, writeFileSync, mkdirSync } from "fs";
+import { dirname, resolve } from "path";
 import { renderJavaScriptOptions } from "../javascript/render-options";
+import { ProjenrcFile } from "../projenrc";
 import { TypeScriptProject } from "../typescript";
 
 export interface ProjenrcOptions {
@@ -18,46 +18,95 @@ export interface ProjenrcOptions {
    * @default "projenrc"
    */
   readonly projenCodeDir?: string;
+
+  /**
+   * Whether to use `SWC` for ts-node.
+   *
+   * @default false
+   */
+  readonly swc?: boolean;
 }
+
+const DEFAULT_FILENAME = ".projenrc.ts";
 
 /**
  * Sets up a typescript project to use TypeScript for projenrc.
  */
-export class Projenrc extends Component {
-  private readonly rcfile: string;
+export class Projenrc extends ProjenrcFile {
+  public readonly filePath: string;
+  private readonly _projenCodeDir: string;
+  private readonly _tsProject: TypeScriptProject;
+  private readonly _swc: boolean;
 
   constructor(project: TypeScriptProject, options: ProjenrcOptions = {}) {
     super(project);
+    this._tsProject = project;
 
-    this.rcfile = options.filename ?? ".projenrc.ts";
+    this.filePath = options.filename ?? DEFAULT_FILENAME;
+    this._projenCodeDir = options.projenCodeDir ?? "projenrc";
+    this._swc = options.swc ?? false;
 
-    const projensrc = options.projenCodeDir ?? "projenrc";
-
-    // tell eslint to take .projenrc.ts and *.ts files under `projen` into account as a dev-dependency
-    project.tsconfigDev.addInclude(this.rcfile);
-    project.eslint?.allowDevDeps(this.rcfile);
-    project.eslint?.addIgnorePattern(`!${this.rcfile}`);
-
-    project.tsconfigDev.addInclude(`${projensrc}/**/*.ts`);
-    project.eslint?.allowDevDeps(`${projensrc}/**/*.ts`);
-    project.eslint?.addIgnorePattern(`!${projensrc}/**/*.ts`);
-
-    // this is the task projen executes when running `projen` without a
-    // specific task (if this task is not defined, projen falls back to
-    // running "node .projenrc.js").
-    project.addDevDeps("ts-node");
-
-    // we use "tsconfig.dev.json" here to allow projen source files to reside
-    // anywhere in the project tree.
-    project.defaultTask?.exec(
-      `ts-node --project ${project.tsconfigDev.fileName} ${this.rcfile}`
-    );
+    this.addDefaultTask();
 
     this.generateProjenrc();
   }
 
+  private addDefaultTask() {
+    const deps = ["ts-node"];
+    if (this._swc) {
+      deps.push("@swc/core");
+    }
+
+    // this is the task projen executes when running `projen` without a
+    // specific task (if this task is not defined, projen falls back to
+    // running "node .projenrc.js").
+    this._tsProject.addDevDeps(...deps);
+
+    const tsNode = this._swc ? "ts-node --swc" : "ts-node";
+
+    // we use "tsconfig.dev.json" here to allow projen source files to reside
+    // anywhere in the project tree.
+    this._tsProject.defaultTask?.exec(
+      `${tsNode} --project ${this._tsProject.tsconfigDev.fileName} ${this.filePath}`
+    );
+  }
+
+  public override preSynthesize(): void {
+    super.preSynthesize();
+
+    this._tsProject.addPackageIgnore(`/${this.filePath}`);
+    this._tsProject.addPackageIgnore(`/${this._projenCodeDir}`);
+
+    this._tsProject.tsconfigDev.addInclude(this.filePath);
+    this._tsProject.tsconfigDev.addInclude(`${this._projenCodeDir}/**/*.ts`);
+
+    this._tsProject.eslint?.addLintPattern(this._projenCodeDir);
+    this._tsProject.eslint?.addLintPattern(this.filePath);
+    this._tsProject.eslint?.allowDevDeps(this.filePath);
+    this._tsProject.eslint?.allowDevDeps(`${this._projenCodeDir}/**/*.ts`);
+    this._tsProject.eslint?.addIgnorePattern(`!${this.filePath}`);
+    this._tsProject.eslint?.addIgnorePattern(`!${this._projenCodeDir}/**/*.ts`);
+
+    this._tsProject.eslint?.addOverride({
+      files: [this.filePath],
+      rules: {
+        "@typescript-eslint/no-require-imports": "off",
+        "import/no-extraneous-dependencies": "off",
+      },
+    });
+
+    this._tsProject.jest?.discoverTestMatchPatternsForDirs(
+      [this._projenCodeDir],
+      {
+        fileExtensionPattern: this._tsProject.tsconfig?.compilerOptions?.allowJs
+          ? undefined
+          : "ts?(x)",
+      }
+    );
+  }
+
   private generateProjenrc() {
-    const rcfile = resolve(this.project.outdir, this.rcfile);
+    const rcfile = resolve(this.project.outdir, this.filePath);
     if (existsSync(rcfile)) {
       return; // already exists
     }
@@ -78,17 +127,16 @@ export class Projenrc extends Component {
       comments: bootstrap.comments,
     });
 
-    imports.add(importName);
+    imports.add(moduleName, importName);
 
     const lines = new Array<string>();
-    lines.push(
-      `import { ${[...imports].sort().join(", ")} } from "${moduleName}";`
-    );
+    lines.push(...imports.asEsmImports());
     lines.push();
     lines.push(`const project = new ${className}(${renderedOptions});`);
     lines.push();
     lines.push("project.synth();");
 
+    mkdirSync(dirname(rcfile), { recursive: true });
     writeFileSync(rcfile, lines.join("\n"));
     this.project.logger.info(
       `Project definition file was created at ${rcfile}`

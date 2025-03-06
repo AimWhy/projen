@@ -1,14 +1,16 @@
+import * as fs from "fs";
 import * as path from "path";
-import * as fs from "fs-extra";
-import { Component } from "../component";
-import { DependencyType } from "../dependencies";
-import { TypeScriptAppProject, TypeScriptProjectOptions } from "../typescript";
 import { AutoDiscover } from "./auto-discover";
 import { AwsCdkDeps, AwsCdkDepsCommonOptions } from "./awscdk-deps";
 import { AwsCdkDepsJs } from "./awscdk-deps-js";
 import { CdkConfig, CdkConfigCommonOptions } from "./cdk-config";
 import { CdkTasks } from "./cdk-tasks";
+import { IntegRunner } from "./integ-runner";
 import { LambdaFunctionCommonOptions } from "./lambda-function";
+import { Component } from "../component";
+import { DependencyType } from "../dependencies";
+import { RunBundleTask } from "../javascript";
+import { TypeScriptAppProject, TypeScriptProjectOptions } from "../typescript";
 
 export interface AwsCdkTypeScriptAppOptions
   extends TypeScriptProjectOptions,
@@ -58,6 +60,14 @@ export interface AwsCdkTypeScriptAppOptions
   readonly integrationTestAutoDiscover?: boolean;
 
   /**
+   * Enable experimental support for the AWS CDK integ-runner.
+   *
+   * @default false
+   * @experimental
+   */
+  readonly experimentalIntegRunner?: boolean;
+
+  /**
    * Common options for all AWS Lambda functions.
    *
    * @default - default options
@@ -104,7 +114,7 @@ export class AwsCdkTypeScriptApp extends TypeScriptAppProject {
 
         // we invoke the "bundle" task as part of the build step in cdk.json so
         // we don't want it to be added to the pre-compile phase.
-        addToPreCompile: false,
+        runBundleTask: RunBundleTask.MANUAL,
       },
     });
 
@@ -115,7 +125,7 @@ export class AwsCdkTypeScriptApp extends TypeScriptAppProject {
     this.appEntrypoint = options.appEntrypoint ?? "main.ts";
 
     // CLI
-    this.addDevDeps(`aws-cdk@${this.cdkDeps.cdkVersion}`);
+    this.addDevDeps(`aws-cdk@${this.cdkDeps.cdkCliVersion}`);
 
     // no compile step because we do all of it in typescript directly
     this.compileTask.reset();
@@ -176,6 +186,10 @@ export class AwsCdkTypeScriptApp extends TypeScriptAppProject {
       lambdaExtensionAutoDiscover: options.lambdaExtensionAutoDiscover ?? true,
       integrationTestAutoDiscover: options.integrationTestAutoDiscover ?? true,
     });
+
+    if (options.experimentalIntegRunner) {
+      new IntegRunner(this);
+    }
   }
 
   /**
@@ -202,7 +216,7 @@ class SampleCode extends Component {
     const outdir = this.project.outdir;
     const srcdir = path.join(outdir, this.appProject.srcdir);
     if (
-      fs.pathExistsSync(srcdir) &&
+      fs.existsSync(srcdir) &&
       fs.readdirSync(srcdir).filter((x) => x.endsWith(".ts"))
     ) {
       return;
@@ -241,12 +255,12 @@ new MyStack(app, '${this.project.name}-dev', { env: devEnv });
 
 app.synth();`;
 
-    fs.mkdirpSync(srcdir);
+    fs.mkdirSync(srcdir, { recursive: true });
     fs.writeFileSync(path.join(srcdir, this.appProject.appEntrypoint), srcCode);
 
     const testdir = path.join(outdir, this.appProject.testdir);
     if (
-      fs.pathExistsSync(testdir) &&
+      fs.existsSync(testdir) &&
       fs.readdirSync(testdir).filter((x) => x.endsWith(".ts"))
     ) {
       return;
@@ -266,7 +280,7 @@ app.synth();`;
       ".ts"
     );
     const testCode = `${testImports.join("\n")}
-import { MyStack } from '../src/${appEntrypointName}';
+import { MyStack } from '../${this.appProject.srcdir}/${appEntrypointName}';
 
 test('Snapshot', () => {
   const app = new App();
@@ -276,7 +290,7 @@ test('Snapshot', () => {
   expect(template.toJSON()).toMatchSnapshot();
 });`;
 
-    fs.mkdirpSync(testdir);
+    fs.mkdirSync(testdir, { recursive: true });
     fs.writeFileSync(
       path.join(testdir, `${appEntrypointName}.test.ts`),
       testCode

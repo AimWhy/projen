@@ -1,5 +1,4 @@
-import { PROJEN_RC } from "../../src/common";
-import { NodeProject, Jest } from "../../src/javascript";
+import { Jest, NodeProject, UpdateSnapshot } from "../../src/javascript";
 import * as logging from "../../src/logging";
 import { TypeScriptProject } from "../../src/typescript";
 import { mkdtemp, synthSnapshot } from "../util";
@@ -123,9 +122,9 @@ test("Typescript Project Jest Defaults Configured", () => {
     compilerOptionDefaults
   );
   expect(jestTypescriptConfig.include).toEqual([
-    PROJEN_RC,
     "src/**/*.ts",
     "test/**/*.ts",
+    ".projenrc.js",
   ]);
   expect(jestTypescriptConfig.exclude).toEqual(["node_modules"]);
 });
@@ -181,7 +180,7 @@ test("jestOptions.typeScriptCompilerOptions is deprecated", () => {
   );
 });
 
-test("testdir is under src", () => {
+test("testdir is under src discovers compiled js tests", () => {
   // WHEN
   const project = new TypeScriptProject({
     defaultReleaseBranch: "master",
@@ -193,7 +192,29 @@ test("testdir is under src", () => {
   // THEN
   const files = synthSnapshot(project);
   expect(files["package.json"].jest.testMatch).toStrictEqual([
-    "**/lib/boom/bam/__tests/**/?(*.)+(spec|test).js?(x)",
+    "<rootDir>/@(lib/boom/bam/__tests)/**/*(*.)@(spec|test).js?(x)",
+    "<rootDir>/@(lib/boom/bam/__tests)/**/__tests__/**/*.js?(x)",
+  ]);
+  files["package.json"].jest.testMatch.forEach((testMatch: string) =>
+    expect(testMatch).toContain(".js")
+  );
+});
+
+test("default testMatch patterns are added to jest config", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+
+  // WHEN
+  new Jest(project, {});
+
+  // THEN
+  expect(synthSnapshot(project)["package.json"].jest.testMatch).toStrictEqual([
+    "**/__tests__/**/*.[jt]s?(x)",
+    "**/*(*.)@(spec|test).[jt]s?(x)",
   ]);
 });
 
@@ -217,6 +238,120 @@ test("addTestMatch() can be used to add patterns", () => {
   ]);
 });
 
+test("discoverTestMatchPatternsForDirs() can be used to build test match patterns for directories", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, { jestConfig: { testMatch: [] } });
+
+  // WHEN
+  jest.discoverTestMatchPatternsForDirs(["foo", "bar/baz"]);
+
+  // THEN
+  expect(synthSnapshot(project)["package.json"].jest.testMatch).toStrictEqual([
+    "<rootDir>/@(foo|bar/baz)/**/*(*.)@(spec|test).[jt]s?(x)",
+    "<rootDir>/@(foo|bar/baz)/**/__tests__/**/*.[jt]s?(x)",
+  ]);
+});
+
+test("addSetupFile() can be used to add setup files", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, {});
+
+  // WHEN
+  jest.addSetupFile("./mySetupFile.ts");
+
+  // THEN
+  expect(synthSnapshot(project)["package.json"].jest.setupFiles).toStrictEqual([
+    "./mySetupFile.ts",
+  ]);
+});
+
+test("addSetupFileAfterEnv() can be used to add setup files", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, {});
+
+  // WHEN
+  jest.addSetupFileAfterEnv("./mySetupFileAfterEnv.ts");
+
+  // THEN
+  expect(
+    synthSnapshot(project)["package.json"].jest.setupFilesAfterEnv
+  ).toStrictEqual(["./mySetupFileAfterEnv.ts"]);
+});
+
+test("addModuleNameMappers() can be used to add module name mappers", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, {});
+
+  // WHEN
+  jest.addModuleNameMappers({
+    "^@/(.*)$": "<rootDir>/src/$1",
+  });
+
+  // THEN
+  expect(
+    synthSnapshot(project)["package.json"].jest.moduleNameMapper
+  ).toStrictEqual({
+    "^@/(.*)$": "<rootDir>/src/$1",
+  });
+});
+
+test("addModulePaths() can be used to add module paths", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, {});
+
+  // WHEN
+  jest.addModulePaths("<rootDir>/src");
+
+  // THEN
+  expect(synthSnapshot(project)["package.json"].jest.modulePaths).toStrictEqual(
+    ["<rootDir>/src"]
+  );
+});
+
+test("addRoots() can be used to add roots", () => {
+  // GIVEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+  });
+  const jest = new Jest(project, {});
+
+  // WHEN
+  jest.addRoots("foo", "bar");
+
+  // THEN
+  expect(synthSnapshot(project)["package.json"].jest.roots).toStrictEqual([
+    "foo",
+    "bar",
+  ]);
+});
+
 test("can set extra CLI options", () => {
   // GIVEN
   const project = new NodeProject({
@@ -234,4 +369,65 @@ test("can set extra CLI options", () => {
   const clFragments = project.testTask.steps.pop()?.exec?.split(" ");
   expect(clFragments).toContain("--json");
   expect(clFragments).toContain("--outputFile=jest-report.json");
+});
+
+test("UpdateSnapshotOptions.ALWAYS adds --updateSnapshot to testTask and 'test:update' task is undefined", () => {
+  // WHEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+    jestOptions: {
+      updateSnapshot: UpdateSnapshot.ALWAYS,
+    },
+  });
+
+  // THEN
+  const testTask = project.testTask;
+  expect(testTask.steps[0].exec).toContain("--updateSnapshot");
+
+  const testUpdateTask = project.tasks.tryFind("test:update");
+  expect(testUpdateTask).toBeUndefined();
+});
+
+test("Jest can be configured to fail without tests", () => {
+  // WHEN
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+    jestOptions: {
+      passWithNoTests: false,
+    },
+  });
+
+  // THEN
+  const testTask = project.testTask;
+  expect(testTask.steps[0].exec).not.toContain("--passWithNoTests");
+});
+
+describe("UpdateSnapshotOptions.NEVER", () => {
+  const project = new NodeProject({
+    outdir: mkdtemp(),
+    defaultReleaseBranch: "master",
+    name: "test",
+    jestOptions: {
+      updateSnapshot: UpdateSnapshot.NEVER,
+    },
+  });
+
+  it("does not add --updateSnapshot", () => {
+    const testTask = project.testTask;
+    expect(testTask.steps[0].exec).not.toContain("--updateSnapshot");
+  });
+
+  it("adds --ci", () => {
+    const testTask = project.testTask;
+    expect(testTask.steps[0].exec).toContain("--ci");
+  });
+
+  it("creates a separate 'test:update' task", () => {
+    const testUpdateTask = project.tasks.tryFind("test:update");
+    expect(testUpdateTask?.steps[0]?.exec).toContain("--updateSnapshot");
+  });
 });

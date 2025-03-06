@@ -1,14 +1,15 @@
 import { mkdtempSync, realpathSync, renameSync } from "fs";
 import { tmpdir } from "os";
 import * as path from "path";
+import { Construct, IConstruct } from "constructs";
 import * as glob from "glob";
 import { cleanup, FILE_MANIFEST } from "./cleanup";
 import { IS_TEST_RUN, PROJEN_VERSION } from "./common";
 import { Component } from "./component";
 import { Dependencies } from "./dependencies";
 import { FileBase } from "./file";
-import { GitAttributesFile } from "./gitattributes";
-import { IgnoreFile } from "./ignore-file";
+import { EndOfLine, GitAttributesFile } from "./gitattributes";
+import { IgnoreFile, IgnoreFileOptions } from "./ignore-file";
 import * as inventory from "./inventory";
 import { resolveInitProject } from "./javascript/render-options";
 import { JsonFile } from "./json";
@@ -16,11 +17,22 @@ import { Logger, LoggerOptions } from "./logger";
 import { ObjectFile } from "./object-file";
 import { InitProjectOptionHints } from "./option-hints";
 import { ProjectBuild as ProjectBuild } from "./project-build";
-import { Projenrc, ProjenrcOptions } from "./projenrc-json";
+import { ProjenrcJson, ProjenrcJsonOptions } from "./projenrc-json";
 import { Renovatebot, RenovatebotOptions } from "./renovatebot";
 import { Task, TaskOptions } from "./task";
 import { Tasks } from "./tasks";
-import { isTruthy } from "./util";
+import { isTruthy, normalizePersistedPath } from "./util";
+import {
+  isProject,
+  findClosestProject,
+  tagAsProject,
+  isComponent,
+} from "./util/constructs";
+
+/**
+ * The default output directory for a project if none is specified.
+ */
+const DEFAULT_OUTDIR = ".";
 
 /**
  * Options for `Project`.
@@ -46,7 +58,7 @@ export interface ProjectOptions {
    *
    * If this project has a parent, this directory is relative to the parent
    * directory and it cannot be the same as the parent or any of it's other
-   * sub-projects.
+   * subprojects.
    *
    * @default "."
    */
@@ -70,7 +82,7 @@ export interface ProjectOptions {
    * Options for .projenrc.json
    * @default - default options
    */
-  readonly projenrcJsonOptions?: ProjenrcOptions;
+  readonly projenrcJsonOptions?: ProjenrcJsonOptions;
 
   /**
    * The shell command to use in order to run the projen CLI.
@@ -101,17 +113,67 @@ export interface ProjectOptions {
    * @default true
    */
   readonly commitGenerated?: boolean;
+
+  /**
+   * Configuration options for git
+   */
+  readonly gitOptions?: GitOptions;
+
+  /**
+   * Configuration options for .gitignore file
+   */
+  readonly gitIgnoreOptions?: IgnoreFileOptions;
 }
 
 /**
+ * Git configuration options
+ */
+export interface GitOptions {
+  /**
+   * File patterns to mark as stored in Git LFS
+   *
+   * @default - No files stored in LFS
+   */
+  readonly lfsPatterns?: string[];
+
+  /**
+   * The default end of line character for text files.
+   *
+   * endOfLine it's useful to keep the same end of line between Windows and Unix operative systems for git checking/checkout operations.
+   * Hence, it can avoid simple repository mutations consisting only of changes in the end of line characters.
+   * It will be set in the first line of the .gitattributes file to make it the first match with high priority but it can be overriden in a later line.
+   * Can be disabled by setting: `endOfLine: EndOfLine.NONE`.
+   *
+   * @default EndOfLine.LF
+   */
+  readonly endOfLine?: EndOfLine;
+}
+/**
  * Base project
  */
-export class Project {
+export class Project extends Construct {
   /**
    * The name of the default task (the task executed when `projen` is run without arguments). Normally
    * this task should synthesize the project files.
    */
   public static readonly DEFAULT_TASK = "default";
+
+  /**
+   * Test whether the given construct is a project.
+   */
+  public static isProject(x: any): x is Project {
+    return isProject(x);
+  }
+
+  /**
+   * Find the closest ancestor project for given construct.
+   * When given a project, this it the project itself.
+   *
+   * @throws when no project is found in the path to the root
+   */
+  public static of(construct: IConstruct): Project {
+    return findClosestProject(construct);
+  }
 
   /**
    * Project name.
@@ -137,12 +199,6 @@ export class Project {
    * Absolute output directory of this project.
    */
   public readonly outdir: string;
-
-  /**
-   * The root project.
-   **/
-  public readonly root: Project;
-
   /**
    * Project tasks.
    */
@@ -168,7 +224,9 @@ export class Project {
   /**
    * The command to use in order to run the projen CLI.
    */
-  public readonly projenCommand: string;
+  public get projenCommand(): string {
+    return this._projenCommand ?? "npx projen";
+  }
 
   /**
    * This is the "default" task, the one that executes "projen". Undefined if
@@ -194,13 +252,27 @@ export class Project {
    */
   public readonly commitGenerated: boolean;
 
-  private readonly _components = new Array<Component>();
-  private readonly subprojects = new Array<Project>();
   private readonly tips = new Array<string>();
   private readonly excludeFromCleanup: string[];
   private readonly _ejected: boolean;
+  /** projenCommand without default value */
+  private readonly _projenCommand?: string;
 
   constructor(options: ProjectOptions) {
+    const outdir = determineOutdir(options.parent, options.outdir);
+    const autoId = `${new.target.name}#${options.name}@${path.normalize(
+      options.outdir ?? "<root>"
+    )}`;
+
+    if (options.parent?.subprojects.find((p) => p.outdir === outdir)) {
+      throw new Error(`There is already a subproject with "outdir": ${outdir}`);
+    }
+
+    super(options.parent as any, autoId);
+    tagAsProject(this);
+    this.node.addMetadata("type", "project");
+    this.node.addMetadata("construct", new.target.name);
+
     this.initProject = resolveInitProject(options);
 
     this.name = options.name;
@@ -209,30 +281,43 @@ export class Project {
 
     this._ejected = isTruthy(process.env.PROJEN_EJECTING);
 
+    this._projenCommand = options.projenCommand;
     if (this.ejected) {
-      this.projenCommand = "scripts/run-task";
-    } else {
-      this.projenCommand = options.projenCommand ?? "npx projen";
+      this._projenCommand = "scripts/run-task.cjs";
     }
 
-    this.outdir = this.determineOutdir(options.outdir);
-    this.root = this.parent ? this.parent.root : this;
-
-    // must happen after this.outdir, this.parent and this.root are initialized
-    this.parent?._addSubProject(this);
+    this.outdir = outdir;
 
     // ------------------------------------------------------------------------
 
-    this.gitattributes = new GitAttributesFile(this);
+    this.gitattributes = new GitAttributesFile(this, {
+      endOfLine: options.gitOptions?.endOfLine,
+    });
     this.annotateGenerated("/.projen/**"); // contents  of the .projen/ directory are generated by projen
     this.annotateGenerated(`/${this.gitattributes.path}`); // the .gitattributes file itself is generated
 
-    this.gitignore = new IgnoreFile(this, ".gitignore");
+    if (options.gitOptions?.lfsPatterns) {
+      for (const pattern of options.gitOptions.lfsPatterns) {
+        this.gitattributes.addAttributes(
+          pattern,
+          "filter=lfs",
+          "diff=lfs",
+          "merge=lfs",
+          "-text"
+        );
+      }
+    }
+
+    this.gitignore = new IgnoreFile(
+      this,
+      ".gitignore",
+      options.gitIgnoreOptions
+    );
     this.gitignore.exclude("node_modules/"); // created by running `npx projen`
     this.gitignore.include(`/${this.gitattributes.path}`);
 
     // oh no: tasks depends on gitignore so it has to be initialized after
-    // smells like dep injectionn but god forbid.
+    // smells like dep injection but god forbid.
     this.tasks = new Tasks(this);
 
     if (!this.ejected) {
@@ -240,13 +325,24 @@ export class Project {
         description: "Synthesize project files",
       });
 
-      this.ejectTask = this.tasks.addTask("eject", {
-        description: "Remove projen from the project",
-        env: {
-          PROJEN_EJECTING: "true",
-        },
-      });
-      this.ejectTask.spawn(this.defaultTask);
+      // Subtasks should call the root task for synth
+      if (this.parent) {
+        const cwd = path.relative(this.outdir, this.root.outdir);
+        const normalizedCwd = normalizePersistedPath(cwd);
+        this.defaultTask.exec(`${this.projenCommand} ${Project.DEFAULT_TASK}`, {
+          cwd: normalizedCwd,
+        });
+      }
+
+      if (!this.parent) {
+        this.ejectTask = this.tasks.addTask("eject", {
+          description: "Remove projen from the project",
+          env: {
+            PROJEN_EJECTING: "true",
+          },
+        });
+        this.ejectTask.spawn(this.defaultTask);
+      }
     }
 
     this.projectBuild = new ProjectBuild(this);
@@ -256,8 +352,8 @@ export class Project {
     this.logger = new Logger(this, options.logging);
 
     const projenrcJson = options.projenrcJson ?? false;
-    if (projenrcJson) {
-      new Projenrc(this, options.projenrcJsonOptions);
+    if (!this.parent && projenrcJson) {
+      new ProjenrcJson(this, options.projenrcJsonOptions);
     }
 
     if (options.renovatebot) {
@@ -273,7 +369,7 @@ export class Project {
           // replace `\` with `/` to ensure paths match across platforms
           files: this.files
             .filter((f) => f.readonly)
-            .map((f) => f.path.replace(/\\/g, "/")),
+            .map((f) => normalizePersistedPath(f.path)),
         }),
         // This file is used by projen to track the generated files, so must be committed.
         committed: true,
@@ -282,18 +378,35 @@ export class Project {
   }
 
   /**
+   * The root project.
+   */
+  public get root(): Project {
+    return isProject(this.node.root) ? this.node.root : this;
+  }
+
+  /**
    * Returns all the components within this project.
    */
-  public get components() {
-    return [...this._components];
+  public get components(): Component[] {
+    return this.node
+      .findAll()
+      .filter(
+        (c): c is Component =>
+          isComponent(c) && c.project.node.path === this.node.path
+      );
+  }
+  /**
+   * Returns all the subprojects within this project.
+   */
+  public get subprojects(): Project[] {
+    return this.node.children.filter(isProject);
   }
 
   /**
    * All files in this project.
    */
   public get files(): FileBase[] {
-    const isFile = (c: Component): c is FileBase => c instanceof FileBase;
-    return this._components
+    return this.components
       .filter(isFile)
       .sort((f1, f2) => f1.path.localeCompare(f2.path));
   }
@@ -351,20 +464,15 @@ export class Project {
     const absolute = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(this.outdir, filePath);
-    for (const file of this.files) {
-      if (absolute === file.absolutePath) {
-        return file;
-      }
-    }
 
-    for (const child of this.subprojects) {
-      const file = child.tryFindFile(absolute);
-      if (file) {
-        return file;
-      }
-    }
+    const candidate = this.node
+      .findAll()
+      .find(
+        (c): c is FileBase =>
+          isComponent(c) && isFile(c) && c.absolutePath === absolute
+      );
 
-    return undefined;
+    return candidate;
   }
 
   /**
@@ -416,23 +524,11 @@ export class Project {
    * the file was not found.
    */
   public tryRemoveFile(filePath: string): FileBase | undefined {
-    const absolute = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(this.outdir, filePath);
-    const isFile = (c: Component): c is FileBase => c instanceof FileBase;
-    const index = this._components.findIndex(
-      (c) => isFile(c) && c.absolutePath === absolute
-    );
+    const candidate = this.tryFindFile(filePath);
 
-    if (index !== -1) {
-      return this._components.splice(index, 1)[0] as FileBase;
-    }
-
-    for (const child of this.subprojects) {
-      const file = child.tryRemoveFile(absolute);
-      if (file) {
-        return file;
-      }
+    if (candidate) {
+      candidate.node.scope?.node.tryRemoveChild(candidate.node.id);
+      return candidate;
     }
 
     return undefined;
@@ -465,7 +561,8 @@ export class Project {
    * @param task The task for which the command is required
    */
   public runTaskCommand(task: Task) {
-    return `npx projen@${PROJEN_VERSION} ${task.name}`;
+    const pj = this._projenCommand ?? `npx projen@${PROJEN_VERSION}`;
+    return `${pj} ${task.name}`;
   }
 
   /**
@@ -502,7 +599,7 @@ export class Project {
    *
    * 1. Call "this.preSynthesize()"
    * 2. Delete all generated files
-   * 3. Synthesize all sub-projects
+   * 3. Synthesize all subprojects
    * 4. Synthesize all components of this project
    * 5. Call "postSynthesize()" for all components of this project
    * 6. Call "this.postSynthesize()"
@@ -513,7 +610,7 @@ export class Project {
 
     this.preSynthesize();
 
-    for (const comp of this._components) {
+    for (const comp of this.components) {
       comp.preSynthesize();
     }
 
@@ -526,7 +623,7 @@ export class Project {
     // delete orphaned files before we start synthesizing new ones
     cleanup(
       outdir,
-      this.files.map((f) => f.path.replace(/\\/g, "/")),
+      this.files.map((f) => normalizePersistedPath(f.path)),
       this.excludeFromCleanup
     );
 
@@ -534,12 +631,12 @@ export class Project {
       subproject.synth();
     }
 
-    for (const comp of this._components) {
+    for (const comp of this.components) {
       comp.synthesize();
     }
 
     if (!isTruthy(process.env.PROJEN_DISABLE_POST)) {
-      for (const comp of this._components) {
+      for (const comp of this.components) {
         comp.postSynthesize();
       }
 
@@ -582,73 +679,6 @@ export class Project {
    * Called after all components are synthesized. Order is *not* guaranteed.
    */
   public postSynthesize() {}
-
-  /**
-   * Adds a component to the project.
-   * @internal
-   */
-  public _addComponent(component: Component) {
-    this._components.push(component);
-  }
-
-  /**
-   * Adds a sub-project to this project.
-   *
-   * This is automatically called when a new project is created with `parent`
-   * pointing to this project, so there is no real need to call this manually.
-   *
-   * @param sub-project The child project to add.
-   * @internal
-   */
-  _addSubProject(subproject: Project) {
-    if (subproject.parent !== this) {
-      throw new Error('"parent" of child project must be this project');
-    }
-
-    // check that `outdir` is exclusive
-    for (const p of this.subprojects) {
-      if (path.resolve(p.outdir) === path.resolve(subproject.outdir)) {
-        throw new Error(
-          `there is already a sub-project with "outdir": ${subproject.outdir}`
-        );
-      }
-    }
-
-    this.subprojects.push(subproject);
-  }
-
-  /**
-   * Resolves the project's output directory.
-   */
-  private determineOutdir(outdirOption?: string) {
-    if (this.parent && outdirOption && path.isAbsolute(outdirOption)) {
-      throw new Error('"outdir" must be a relative path');
-    }
-
-    // if this is a subproject, it is relative to the parent
-    if (this.parent) {
-      if (!outdirOption) {
-        throw new Error('"outdir" must be specified for subprojects');
-      }
-
-      return path.resolve(this.parent.outdir, outdirOption);
-    }
-
-    // if this is running inside a test and outdir is not explicitly set
-    // use a temp directory (unless cwd is aleady under tmp)
-    if (IS_TEST_RUN && !outdirOption) {
-      const realCwd = realpathSync(process.cwd());
-      const realTmp = realpathSync(tmpdir());
-
-      if (realCwd.startsWith(realTmp)) {
-        return path.resolve(realCwd, outdirOption ?? ".");
-      }
-
-      return mkdtempSync(path.join(tmpdir(), "projen."));
-    }
-
-    return path.resolve(outdirOption ?? ".");
-  }
 }
 
 /**
@@ -700,4 +730,41 @@ export interface InitProject {
    * @default InitProjectOptionHints.FEATURED
    */
   readonly comments: InitProjectOptionHints;
+}
+
+/**
+ * Resolves the project's output directory.
+ */
+function determineOutdir(parent?: Project, outdirOption?: string) {
+  if (parent && outdirOption && path.isAbsolute(outdirOption)) {
+    throw new Error('"outdir" must be a relative path');
+  }
+
+  // if this is a subproject, it is relative to the parent
+  if (parent) {
+    if (!outdirOption) {
+      throw new Error('"outdir" must be specified for subprojects');
+    }
+
+    return path.resolve(parent.outdir, outdirOption);
+  }
+
+  // if this is running inside a test and outdir is not explicitly set
+  // use a temp directory (unless cwd is already under tmp)
+  if (IS_TEST_RUN && !outdirOption) {
+    const realCwd = realpathSync(process.cwd());
+    const realTmp = realpathSync(tmpdir());
+
+    if (realCwd.startsWith(realTmp)) {
+      return path.resolve(realCwd, outdirOption ?? DEFAULT_OUTDIR);
+    }
+
+    return mkdtempSync(path.join(tmpdir(), "projen."));
+  }
+
+  return path.resolve(outdirOption ?? DEFAULT_OUTDIR);
+}
+
+function isFile(c: Component): c is FileBase {
+  return c instanceof FileBase;
 }

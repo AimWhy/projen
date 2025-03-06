@@ -1,14 +1,14 @@
-import { Clobber } from "../clobber";
-import { Gitpod } from "../gitpod";
-import { Project, ProjectOptions, ProjectType } from "../project";
-import { SampleReadme, SampleReadmeProps } from "../readme";
-import { DevContainer, VsCode } from "../vscode";
 import { AutoApprove, AutoApproveOptions } from "./auto-approve";
 import { AutoMergeOptions } from "./auto-merge";
 import { GitHub, GitHubOptions } from "./github";
 import { GithubCredentials } from "./github-credentials";
 import { MergifyOptions } from "./mergify";
 import { Stale, StaleOptions } from "./stale";
+import { Clobber } from "../clobber";
+import { Gitpod } from "../gitpod";
+import { Project, ProjectOptions, ProjectType } from "../project";
+import { SampleReadme, SampleReadmeProps } from "../readme";
+import { DevContainer, VsCode } from "../vscode";
 
 /**
  * Options for `GitHubProject`.
@@ -71,7 +71,7 @@ export interface GitHubProjectOptions extends ProjectOptions {
 
   /**
    * Add a `clobber` task which resets the repo to origin.
-   * @default true
+   * @default - true, but false for subprojects
    */
   readonly clobber?: boolean;
 
@@ -198,7 +198,7 @@ export class GitHubProject extends Project {
 
     this.projectType = options.projectType ?? ProjectType.UNKNOWN;
     // we only allow these global services to be used in root projects
-    const github = options.github ?? (this.parent ? false : true);
+    const github = options.github ?? !this.parent;
     this.github = github
       ? new GitHub(this, {
           projenTokenSecret: options.projenTokenSecret,
@@ -209,7 +209,7 @@ export class GitHubProject extends Project {
         })
       : undefined;
 
-    const vscode = options.vscode ?? (this.parent ? false : true);
+    const vscode = options.vscode ?? !this.parent;
     this.vscode = vscode ? new VsCode(this) : undefined;
 
     this.gitpod = options.gitpod ? new Gitpod(this) : undefined;
@@ -217,7 +217,7 @@ export class GitHubProject extends Project {
       ? new DevContainer(this)
       : undefined;
 
-    if (options.clobber ?? true) {
+    if (options.clobber ?? !this.parent) {
       new Clobber(this);
     }
 

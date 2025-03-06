@@ -1,11 +1,25 @@
+import * as path from "path";
+import * as semver from "semver";
 import { NodeProject } from ".";
+import { Component } from "../component";
 import { JsonFile } from "../json";
+import { Project } from "../project";
+import { normalizePersistedPath } from "../util";
 
 export interface TypescriptConfigOptions {
   /**
    * @default "tsconfig.json"
    */
   readonly fileName?: string;
+
+  /**
+   * Base `tsconfig.json` configuration(s) to inherit from.
+   *
+   * @remarks
+   * Must provide either `extends` or `compilerOptions` (or both).
+   */
+  readonly extends?: TypescriptConfigExtends;
+
   /**
    * Specifies a list of glob patterns that match TypeScript files to be included in compilation.
    *
@@ -22,8 +36,11 @@ export interface TypescriptConfigOptions {
 
   /**
    * Compiler options to use.
+   *
+   * @remarks
+   * Must provide either `extends` or `compilerOptions` (or both).
    */
-  readonly compilerOptions: TypeScriptCompilerOptions;
+  readonly compilerOptions?: TypeScriptCompilerOptions;
 }
 
 /**
@@ -45,6 +62,88 @@ export enum TypeScriptModuleResolution {
    * @see https://www.typescriptlang.org/docs/handbook/module-resolution.html#node
    */
   NODE = "node",
+
+  /**
+   * `--moduleResolution node` was renamed to `node10`
+   * (keeping `node` as an alias for backward compatibility) in TypeScript 5.0.
+   * It reflects the CommonJS module resolution algorithm as it existed in Node.js versions
+   * earlier than v12. It should no longer be used.
+   *
+   * @see https://www.typescriptlang.org/docs/handbook/modules/reference.html#node10-formerly-known-as-node
+   */
+  NODE10 = "node10",
+
+  /**
+   * Node.js’ ECMAScript Module Support from TypeScript 4.7 onwards
+   *
+   * @see https://www.typescriptlang.org/tsconfig#moduleResolution
+   */
+  NODE16 = "node16",
+
+  /**
+   * Node.js’ ECMAScript Module Support from TypeScript 4.7 onwards
+   *
+   * @see https://www.typescriptlang.org/tsconfig#moduleResolution
+   */
+  NODE_NEXT = "nodenext",
+
+  /**
+   * Resolution strategy which attempts to mimic resolution patterns of modern bundlers; from TypeScript 5.0 onwards.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#moduleResolution
+   */
+  BUNDLER = "bundler",
+}
+
+/**
+ * This setting controls how TypeScript determines whether a file is a script or a module.
+ *
+ * @see https://www.typescriptlang.org/docs/handbook/modules/theory.html#scripts-and-modules-in-javascript
+ */
+export enum TypeScriptModuleDetection {
+  /**
+   * TypeScript will not only look for import and export statements, but it will also check whether the "type" field in a package.json is set to "module" when running with module: nodenext or node16, and check whether the current file is a JSX file when running under jsx: react-jsx.
+   *
+   * @see https://www.typescriptlang.org/tsconfig/#moduleDetection
+   */
+  AUTO = "auto",
+
+  /**
+   * The same behavior as 4.6 and prior, usings import and export statements to determine whether a file is a module.
+   *
+   * @see https://www.typescriptlang.org/tsconfig/#moduleDetection
+   */
+  LEGACY = "legacy",
+
+  /**
+   * Ensures that every non-declaration file is treated as a module.
+   *
+   * @see https://www.typescriptlang.org/tsconfig/#moduleDetection
+   */
+  FORCE = "force",
+}
+
+/**
+ * This flag controls how `import` works, there are 3 different options.
+ *
+ * @see https://www.typescriptlang.org/tsconfig#importsNotUsedAsValues
+ */
+export enum TypeScriptImportsNotUsedAsValues {
+  /**
+   * The default behavior of dropping `import` statements which only reference types.
+   */
+  REMOVE = "remove",
+
+  /**
+   * Preserves all `import` statements whose values or types are never used. This can cause imports/side-effects to be preserved.
+   */
+  PRESERVE = "preserve",
+
+  /**
+   * This preserves all imports (the same as the preserve option), but will error when a value import is only used as a type.
+   * This might be useful if you want to ensure no values are being accidentally imported, but still make side-effect imports explicit.
+   */
+  ERROR = "error",
 }
 
 /**
@@ -90,6 +189,22 @@ export interface TypeScriptCompilerOptions {
   readonly allowJs?: boolean;
 
   /**
+   * Allows TypeScript files to import each other with TypeScript-specific extensions (`.ts`, `.mts`, `.tsx`).
+   * Requires `noEmit` or `emitDeclarationOnly`.
+   *
+   * @default undefined
+   */
+  readonly allowImportingTsExtensions?: boolean;
+
+  /**
+   * Suppress arbitrary extension import errors with the assumption that a bundler will be handling it.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#allowArbitraryExtensions
+   * @default undefined
+   */
+  readonly allowArbitraryExtensions?: boolean;
+
+  /**
    * Ensures that your files are parsed in the ECMAScript strict mode, and emit “use strict”
    * for each source file.
    *
@@ -108,6 +223,30 @@ export interface TypeScriptCompilerOptions {
    *
    */
   readonly declaration?: boolean;
+
+  /**
+   * Generates a source map for .d.ts files which map back to the original .ts source file.
+   * This will allow editors such as VS Code to go to the original .ts file when using features like Go to Definition.
+   * @see {@link https://www.typescriptlang.org/tsconfig#declarationMap}
+   */
+  readonly declarationMap?: boolean;
+
+  /**
+   * Downleveling is TypeScript’s term for transpiling to an older version of JavaScript.
+   * This flag is to enable support for a more accurate implementation of how modern JavaScript iterates through new concepts in older JavaScript runtimes.
+   *
+   * ECMAScript 6 added several new iteration primitives: the for / of loop (for (el of arr)), Array spread ([a, ...b]), argument spread (fn(...args)), and Symbol.iterator.
+   * downlevelIteration allows for these iteration primitives to be used more accurately in ES5 environments if a Symbol.iterator implementation is present.
+   */
+  readonly downlevelIteration?: boolean;
+
+  /**
+   * List of additional conditions that should succeed when TypeScript resolves from an `exports` or `imports` field of a `package.json`.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#customConditions
+   * @default undefined
+   */
+  readonly customConditions?: string[];
 
   /**
    * Emit __importStar and __importDefault helpers for runtime babel
@@ -144,6 +283,26 @@ export interface TypeScriptCompilerOptions {
   readonly forceConsistentCasingInFileNames?: boolean;
 
   /**
+   * Simplifies TypeScript's handling of import/export `type` modifiers.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#verbatimModuleSyntax
+   * @default undefined
+   */
+  readonly verbatimModuleSyntax?: boolean;
+
+  /**
+   * This flag works because you can use `import type` to explicitly create an `import` statement which should never be emitted into JavaScript.
+   *
+   * @remarks
+   * For TypeScript 5.0+ use `verbatimModuleSyntax` instead.
+   * Posed for deprecation upon TypeScript 5.5.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#importsNotUsedAsValues
+   * @default "remove"
+   */
+  readonly importsNotUsedAsValues?: TypeScriptImportsNotUsedAsValues;
+
+  /**
    * When set, instead of writing out a .js.map file to provide source maps,
    * TypeScript will embed the source map content in the .js files.
    *
@@ -158,6 +317,21 @@ export interface TypeScriptCompilerOptions {
    * @default true
    */
   readonly inlineSources?: boolean;
+
+  /**
+   * Enables the generation of sourcemap files.
+   *
+   * @default undefined
+   */
+  readonly sourceMap?: boolean;
+
+  /**
+   * Specify the location where a debugger should locate TypeScript files
+   * instead of relative source locations.
+   *
+   * @default undefined
+   */
+  readonly sourceRoot?: string;
 
   /**
    * Perform additional checks to ensure that separate compilation (such as
@@ -175,11 +349,25 @@ export interface TypeScriptCompilerOptions {
   readonly jsx?: TypeScriptJsxMode;
 
   /**
+   * Declares the module specifier to be used for importing the jsx and jsxs factory functions when using jsx.
+   *
+   * @default undefined
+   */
+  readonly jsxImportSource?: string;
+
+  /**
    * Reference for type definitions / libraries to use (eg. ES2016, ES5, ES2018).
    *
    * @default [ "es2018" ]
    */
   readonly lib?: string[];
+
+  /**
+   * This setting controls how TypeScript determines whether a file is a [script or a module](https://www.typescriptlang.org/docs/handbook/modules/theory.html#scripts-and-modules-in-javascript).
+   *
+   * @default "auto"
+   */
+  readonly moduleDetection?: TypeScriptModuleDetection;
 
   /**
    * Sets the module system for the program.
@@ -202,6 +390,13 @@ export interface TypeScriptCompilerOptions {
    * @default false
    */
   readonly noEmit?: boolean;
+
+  /**
+   * Only emit .d.ts files; do not emit .js files.
+   *
+   * @default false
+   */
+  readonly emitDeclarationOnly?: boolean;
 
   /**
    * Do not emit compiler output files like JavaScript source code, source-maps or
@@ -227,6 +422,17 @@ export interface TypeScriptCompilerOptions {
    * @default true
    */
   readonly noImplicitAny?: boolean;
+
+  /**
+   * Using `noImplicitOverride`, you can ensure that sub-classes never go out of sync as
+   * they are required to explicitly declare that they are overriding a member using the
+   * `override` keyword. This also improves readability of the programmer's intent.
+   *
+   * Available with TypeScript 4.3 and newer.
+   *
+   * @default false
+   */
+  readonly noImplicitOverride?: boolean;
 
   /**
    * When enabled, TypeScript will check all code paths in a function to ensure they
@@ -314,11 +520,25 @@ export interface TypeScriptCompilerOptions {
   readonly strictPropertyInitialization?: boolean;
 
   /**
-   * Do not emit declarations for code that has an @internal annotation in it’s JSDoc comment.
+   * Do not emit declarations for code that has an `@internal` annotation in it’s JSDoc comment.
    *
    * @default true
    */
   readonly stripInternal?: boolean;
+
+  /**
+   * Forces TypeScript to consult the `exports` field of `package.json` files if it ever reads from a package in `node_modules`.
+   *
+   * @default true
+   */
+  readonly resolvePackageJsonExports?: boolean;
+
+  /**
+   * Forces TypeScript to consult the `imports` field of `package.json` when performing a lookup that begins with `#` from a file that has a `package.json` as an ancestor.
+   *
+   * @default undefined
+   */
+  readonly resolvePackageJsonImports?: boolean;
 
   /**
    * Modern browsers support all ES6 features, so ES6 is a good choice. You might choose to set
@@ -347,6 +567,20 @@ export interface TypeScriptCompilerOptions {
   readonly allowSyntheticDefaultImports?: boolean;
 
   /**
+   * Specifies that optional property types should be interpreted exactly as written, meaning that `| undefined` is not added to the type
+   * Available with TypeScript 4.4 and newer.
+   * @default false
+   */
+  readonly exactOptionalPropertyTypes?: boolean;
+
+  /**
+   * Change the type of the variable in a catch clause from any to unknown
+   * Available with TypeScript 4.4 and newer.
+   * @default true
+   */
+  readonly useUnknownInCatchVariables?: boolean;
+
+  /**
    * Lets you set a base directory to resolve non-absolute module names.
    *
    * You can define a root folder where you can do absolute file resolution.
@@ -359,40 +593,325 @@ export interface TypeScriptCompilerOptions {
    * paths lets you declare how TypeScript should resolve an import in your require/imports.
    */
   readonly paths?: { [key: string]: string[] };
+
+  /**
+   * If typeRoots is specified, only packages under typeRoots will be included
+   * @see https://www.typescriptlang.org/tsconfig/#typeRoots
+   */
+  readonly typeRoots?: string[];
+
+  /**
+   * If types is specified, only packages listed will be included in the global scope
+   * @see https://www.typescriptlang.org/tsconfig#types
+   */
+  readonly types?: string[];
+
+  /**
+   * Tells TypeScript to save information about the project graph from the last compilation to files stored on disk.
+   * This creates a series of .tsbuildinfo files in the same folder as your compilation output.
+   * They are not used by your JavaScript at runtime and can be safely deleted.
+   * You can read more about the flag in the 3.4 release notes.
+   *
+   * @see https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-4.html#faster-subsequent-builds-with-the---incremental-flag
+   *
+   * To control which folders you want to the files to be built to, use the config option tsBuildInfoFile.
+   */
+  readonly incremental?: boolean;
+
+  /**
+   * This setting lets you specify a file for storing incremental compilation information as a part of composite projects which enables faster building of larger TypeScript codebases.
+   * You can read more about composite projects in the handbook.
+   */
+  readonly tsBuildInfoFile?: string;
+
+  /**
+   * Allow Unused Labels
+   *
+   * When:
+   *
+   * - `undefined` (default) provide suggestions as warnings to editors
+   * - `true` unused labels are ignored
+   * - `false` raises compiler errors about unused labels
+   *
+   * Labels are very rare in JavaScript and typically indicate an attempt to write an object literal:
+   *
+   * ```ts
+   * function verifyAge(age: number) {
+   *   // Forgot 'return' statement
+   *   if (age > 18) {
+   *     verified: true;
+   * //  ^^^^^^^^ Unused label.
+   *   }
+   * }
+   * ```
+   *
+   * @see https://www.typescriptlang.org/tsconfig#allowUnusedLabels
+   */
+  readonly allowUnusedLabels?: boolean;
+
+  /**
+   * Allow Unreachable Code
+   *
+   * When:
+   *
+   * - `undefined` (default) provide suggestions as warnings to editors
+   * - `true` unreachable code is ignored
+   * - `false` raises compiler errors about unreachable code
+   *
+   * These warnings are only about code which is provably unreachable due to the use of JavaScript syntax.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#allowUnreachableCode
+   */
+  readonly allowUnreachableCode?: boolean;
+
+  /**
+   * Check JS
+   *
+   * Works in tandem with [allowJs](https://www.typescriptlang.org/tsconfig#allowJs). When checkJs is enabled then
+   * errors are reported in JavaScript files. This is the equivalent of including // @ts-check at the top of all
+   * JavaScript files which are included in your project.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#checkJs
+   */
+  readonly checkJs?: boolean;
 }
 
-export class TypescriptConfig {
-  public readonly compilerOptions: TypeScriptCompilerOptions;
-  public readonly include: string[];
-  public readonly exclude: string[];
+/**
+ * Container for `TypescriptConfig` `tsconfig.json` base configuration(s).
+ * Extending from more than one base config file requires TypeScript 5.0+.
+ */
+export class TypescriptConfigExtends {
+  /**
+   * Factory for creation from array of file paths.
+   *
+   * @remarks
+   * TypeScript 5.0+ is required to specify more than one value in `paths`.
+   *
+   * @param paths Absolute or relative paths to base `tsconfig.json` files.
+   */
+  public static fromPaths(paths: string[]) {
+    return new TypescriptConfigExtends(paths);
+  }
+
+  /**
+   * Factory for creation from array of other `TypescriptConfig` instances.
+   *
+   * @remarks
+   * TypeScript 5.0+ is required to specify more than on value in `configs`.
+   *
+   * @param configs Base `TypescriptConfig` instances.
+   */
+  public static fromTypescriptConfigs(configs: TypescriptConfig[]) {
+    const paths = configs.map((config) => config.file.absolutePath);
+    return TypescriptConfigExtends.fromPaths(paths);
+  }
+
+  private readonly bases: string[];
+
+  private constructor(bases: string[]) {
+    this.bases = bases;
+  }
+
+  public toJSON(): string[] {
+    return this.bases;
+  }
+}
+
+export class TypescriptConfig extends Component {
+  private _extends: TypescriptConfigExtends;
+  public readonly compilerOptions?: TypeScriptCompilerOptions;
+  private readonly includeSet: Set<string>;
+  private readonly excludeSet: Set<string>;
   public readonly fileName: string;
   public readonly file: JsonFile;
 
-  constructor(project: NodeProject, options: TypescriptConfigOptions) {
+  constructor(project: Project, options: TypescriptConfigOptions) {
+    super(project);
     const fileName = options.fileName ?? "tsconfig.json";
 
-    this.include = options.include ?? ["**/*.ts"];
-    this.exclude = options.exclude ?? ["node_modules"];
+    if (!options.extends && !options.compilerOptions) {
+      throw new Error(
+        "TypescriptConfig: Must provide either `extends` or `compilerOptions` (or both)."
+      );
+    }
+
+    this._extends = options.extends ?? TypescriptConfigExtends.fromPaths([]);
+    this.includeSet = options.include
+      ? new Set(options.include)
+      : new Set(["**/*.ts"]);
+    this.excludeSet = options.exclude
+      ? new Set(options.exclude)
+      : new Set(["node_modules"]);
     this.fileName = fileName;
 
     this.compilerOptions = options.compilerOptions;
 
     this.file = new JsonFile(project, fileName, {
+      allowComments: true,
       obj: {
+        extends: () => this.renderExtends(),
         compilerOptions: this.compilerOptions,
         include: () => this.include,
         exclude: () => this.exclude,
       },
     });
 
-    project.npmignore?.exclude(`/${fileName}`);
+    if (project instanceof NodeProject) {
+      project.npmignore?.exclude(`/${fileName}`);
+    }
   }
 
+  public get include(): string[] {
+    return [...this.includeSet];
+  }
+
+  public get exclude(): string[] {
+    return [...this.excludeSet];
+  }
+
+  /**
+   * Render appropriate value for `extends` field.
+   * @private
+   */
+  private renderExtends(): string | string[] | undefined {
+    if (this.extends.length <= 1) {
+      // render string value when only one extension (TS<5.0);
+      // omit if no extensions.
+      return this.extends[0];
+    }
+    // render many extensions as array (TS>=5.0)
+    return this.extends;
+  }
+
+  /**
+   * Resolve valid TypeScript extends paths relative to this config.
+   *
+   * @remarks
+   * This will only resolve the relative path from this config to another given
+   * an absolute path as input. Any non-absolute path or other string will be returned as is.
+   * This is to preserve manually specified relative paths as well as npm import paths.
+   *
+   * @param configPath Path to resolve against.
+   */
+  public resolveExtendsPath(configPath: string): string {
+    // if not absolute assume user-defined path (or npm package).
+    if (!path.isAbsolute(configPath)) return configPath;
+    const relativeConfig = path.relative(
+      path.dirname(this.file.absolutePath),
+      configPath
+    );
+    // ensure immediate sibling files are prefixed with './'
+    // typescript figures this out, but some tools seemingly break without it (i.e, eslint).
+    const { dir, ...pathParts } = path.parse(relativeConfig);
+    const configDir = dir
+      ? path.format({ dir: dir.startsWith("..") ? "" : ".", base: dir })
+      : ".";
+
+    const extendsPath = path.format({ ...pathParts, dir: configDir });
+
+    return normalizePersistedPath(extendsPath);
+  }
+
+  /**
+   * Validate usage of `extends` against current TypeScript version.
+   * @private
+   */
+  private validateExtends() {
+    const project = this.project;
+    const hasOneOrNoneExtends = this.extends.length <= 1;
+    const isNodeProject = project instanceof NodeProject;
+    if (hasOneOrNoneExtends || !isNodeProject) {
+      // always accept no extends or singular extends.
+      return;
+    }
+    const tsVersion = semver.coerce(
+      project.package.tryResolveDependencyVersion("typescript"),
+      { loose: true }
+    );
+    if (tsVersion && tsVersion.major < 5) {
+      this.project.logger.warn(
+        "TypeScript < 5.0.0 can only extend from a single base config.",
+        `TypeScript Version: ${tsVersion.format()}`,
+        `File: ${this.file.absolutePath}`,
+        `Extends: ${this.extends}`
+      );
+    }
+  }
+
+  /**
+   * Array of base `tsconfig.json` paths.
+   * Any absolute paths are resolved relative to this instance,
+   * while any relative paths are used as is.
+   */
+  public get extends(): string[] {
+    return this._extends
+      .toJSON()
+      .map((value) => this.resolveExtendsPath(value));
+  }
+
+  /**
+   * Extend from base `TypescriptConfig` instance.
+   *
+   * @remarks
+   * TypeScript 5.0+ is required to extend from more than one base `TypescriptConfig`.
+   *
+   * @param value Base `TypescriptConfig` instance.
+   */
+  public addExtends(value: TypescriptConfig) {
+    this._extends = TypescriptConfigExtends.fromPaths([
+      ...this._extends.toJSON(),
+      value.file.absolutePath,
+    ]);
+  }
+
+  /**
+   * Add an include pattern to the `include` array of the TSConfig.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#include
+   *
+   * @param pattern The pattern to add.
+   */
   public addInclude(pattern: string) {
     this.include.push(pattern);
+    this.includeSet.add(pattern);
   }
 
+  /**
+   * Add an exclude pattern to the `exclude` array of the TSConfig.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#exclude
+   *
+   * @param pattern The pattern to add.
+   */
   public addExclude(pattern: string) {
     this.exclude.push(pattern);
+    this.excludeSet.add(pattern);
+  }
+
+  /**
+   * Remove an include pattern from the `include` array of the TSConfig.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#include
+   *
+   * @param pattern The pattern to remove.
+   */
+  public removeInclude(pattern: string) {
+    this.includeSet.delete(pattern);
+  }
+
+  /**
+   * Remove an exclude pattern from the `exclude` array of the TSConfig.
+   *
+   * @see https://www.typescriptlang.org/tsconfig#exclude
+   *
+   * @param pattern The pattern to remove.
+   */
+  public removeExclude(pattern: string) {
+    this.excludeSet.delete(pattern);
+  }
+
+  preSynthesize() {
+    super.preSynthesize();
+    this.validateExtends();
   }
 }

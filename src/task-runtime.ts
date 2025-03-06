@@ -1,15 +1,17 @@
 import { SpawnOptions, spawnSync } from "child_process";
 import { existsSync, readFileSync, statSync } from "fs";
-import { platform } from "os";
 import { dirname, join, resolve } from "path";
 import * as path from "path";
 import { format } from "util";
-import * as chalk from "chalk";
+import { gray, underline } from "chalk";
 import { PROJEN_DIR } from "./common";
 import * as logging from "./logging";
-import { TasksManifest, TaskSpec } from "./task-model";
+import { TasksManifest, TaskSpec, TaskStep } from "./task-model";
+import { makeCrossPlatform } from "./util/tasks";
 
 const ENV_TRIM_LEN = 20;
+const ARGS_MARKER = "$@";
+const QUOTED_ARGS_MARKER = `"${ARGS_MARKER}"`;
 
 /**
  * The runtime component of the tasks engine.
@@ -62,13 +64,18 @@ export class TaskRuntime {
    * Runs the task.
    * @param name The task name.
    */
-  public runTask(name: string, parents: string[] = []) {
+  public runTask(
+    name: string,
+    parents: string[] = [],
+    args: Array<string | number> = [],
+    env: { [name: string]: string } = {}
+  ) {
     const task = this.tryFindTask(name);
     if (!task) {
       throw new Error(`cannot find command ${task}`);
     }
 
-    new RunTask(this, task, parents);
+    new RunTask(this, task, parents, args, env);
   }
 }
 
@@ -81,20 +88,20 @@ class RunTask {
   constructor(
     private readonly runtime: TaskRuntime,
     private readonly task: TaskSpec,
-    parents: string[] = []
+    parents: string[] = [],
+    args: Array<string | number> = [],
+    envParam: { [name: string]: string } = {}
   ) {
     this.workdir = task.cwd ?? this.runtime.workdir;
 
     this.parents = parents;
 
     if (!task.steps || task.steps.length === 0) {
-      this.logDebug(
-        chalk.gray("No actions have been specified for this task.")
-      );
+      this.logDebug(gray("No actions have been specified for this task."));
       return;
     }
 
-    this.env = this.resolveEnvironment(parents);
+    this.env = this.resolveEnvironment(envParam, parents);
 
     const envlogs = [];
     for (const [k, v] of Object.entries(this.env)) {
@@ -105,9 +112,7 @@ class RunTask {
     }
 
     if (envlogs.length) {
-      this.logDebug(
-        chalk.gray(`${chalk.underline("env")}: ${envlogs.join(" ")}`)
-      );
+      this.logDebug(gray(`${underline("env")}: ${envlogs.join(" ")}`));
     }
 
     // evaluate condition
@@ -132,37 +137,65 @@ class RunTask {
     }
 
     for (const step of task.steps) {
+      // evaluate step condition
+      if (!this.evalCondition(step)) {
+        this.log("condition exited with non-zero - skipping");
+        continue;
+      }
+
+      const argsList: string[] = [
+        ...(step.args || []),
+        ...(step.receiveArgs ? args : []),
+      ].map((a) => a.toString());
+
       if (step.say) {
         logging.info(this.fmtLog(step.say));
       }
 
       if (step.spawn) {
-        this.runtime.runTask(step.spawn, [...this.parents, this.task.name]);
+        this.runtime.runTask(
+          step.spawn,
+          [...this.parents, this.task.name],
+          argsList,
+          step.env
+        );
       }
 
       const execs = step.exec ? [step.exec] : [];
+
+      // Parse step-specific environment variables
+      const env = this.evalEnvironment(step.env ?? {});
 
       if (step.builtin) {
         execs.push(this.renderBuiltin(step.builtin));
       }
 
       for (const exec of execs) {
-        let command = "";
         let hasError = false;
-        const cmd = exec.split(" ")[0];
-        if (
-          platform() == "win32" &&
-          ["mkdir", "mv", "rm", "cp"].includes(cmd)
-        ) {
-          command = `shx ${exec}`;
+
+        let command = makeCrossPlatform(exec);
+
+        if (command.includes(QUOTED_ARGS_MARKER)) {
+          // Poorly imitate bash quoted variable expansion. If "$@" is encountered in bash, elements of the arg array
+          // that contain whitespace will be single quoted ('arg'). This preserves whitespace in things like filenames.
+          // Imitate that behavior here by single quoting every element of the arg array when a quoted arg marker ("$@")
+          // is encountered.
+          command = command.replace(
+            QUOTED_ARGS_MARKER,
+            argsList.map((arg) => `'${arg}'`).join(" ")
+          );
+        } else if (command.includes(ARGS_MARKER)) {
+          command = command.replace(ARGS_MARKER, argsList.join(" "));
         } else {
-          command = exec;
+          command = [command, ...argsList].join(" ");
         }
+
         const cwd = step.cwd;
         try {
           const result = this.shell({
             command,
             cwd,
+            extraEnv: env,
           });
           hasError = result.status !== 0;
         } catch (e) {
@@ -192,15 +225,15 @@ class RunTask {
    * evaluates to false (exits with non-zero), indicating that the task should
    * be skipped.
    */
-  private evalCondition(task: TaskSpec) {
+  private evalCondition(taskOrStep: TaskSpec | TaskStep) {
     // no condition, carry on
-    if (!task.condition) {
+    if (!taskOrStep.condition) {
       return true;
     }
 
-    this.log(chalk.gray(`${chalk.underline("condition")}: ${task.condition}`));
+    this.log(gray(`${underline("condition")}: ${taskOrStep.condition}`));
     const result = this.shell({
-      command: task.condition,
+      command: taskOrStep.condition,
       logprefix: "condition: ",
       quiet: true,
     });
@@ -212,31 +245,13 @@ class RunTask {
   }
 
   /**
-   * Renders the runtime environment for a task. Namely, it supports this syntax
-   * `$(xx)` for allowing environment to be evaluated by executing a shell
-   * command and obtaining its result.
+   * Evaluates environment variables from shell commands (e.g. `$(xx)`)
    */
-  private resolveEnvironment(parents: string[]) {
-    let env = this.runtime.manifest.env ?? {};
-
-    // add env from all parent tasks one by one
-    for (const parent of parents) {
-      env = {
-        ...env,
-        ...(this.runtime.tryFindTask(parent)?.env ?? {}),
-      };
-    }
-
-    // apply the task's environment last
-    env = {
-      ...env,
-      ...(this.task.env ?? {}),
-    };
-
+  private evalEnvironment(env: { [name: string]: string }) {
     const output: { [name: string]: string | undefined } = {};
 
     for (const [key, value] of Object.entries(env ?? {})) {
-      if (value.startsWith("$(") && value.endsWith(")")) {
+      if (String(value).startsWith("$(") && String(value).endsWith(")")) {
         const query = value.substring(2, value.length - 1);
         const result = this.shellEval({ command: query });
         if (result.status !== 0) {
@@ -252,8 +267,36 @@ class RunTask {
         output[key] = value;
       }
     }
-
     return output;
+  }
+
+  /**
+   * Renders the runtime environment for a task. Namely, it supports this syntax
+   * `$(xx)` for allowing environment to be evaluated by executing a shell
+   * command and obtaining its result.
+   */
+  private resolveEnvironment(
+    envParam: { [name: string]: string },
+    parents: string[]
+  ) {
+    let env = this.runtime.manifest.env ?? {};
+
+    // add env from all parent tasks one by one
+    for (const parent of parents) {
+      env = {
+        ...env,
+        ...(this.runtime.tryFindTask(parent)?.env ?? {}),
+      };
+    }
+
+    // apply task environment, then the specific env last
+    env = {
+      ...env,
+      ...(this.task.env ?? {}),
+      ...envParam,
+    };
+
+    return this.evalEnvironment(env ?? {});
   }
 
   /**
@@ -272,7 +315,7 @@ class RunTask {
   }
 
   private fmtLog(...args: any[]) {
-    return format(`${chalk.underline(this.fullname)} |`, ...args);
+    return format(`${underline(this.fullname)} |`, ...args);
   }
 
   private shell(options: ShellOptions) {
@@ -308,6 +351,7 @@ class RunTask {
       env: {
         ...process.env,
         ...this.env,
+        ...options.extraEnv,
       },
       ...options.spawnOptions,
     });
@@ -328,7 +372,7 @@ class RunTask {
     const program = require.resolve(
       join(moduleRoot, "lib", `${builtin}.task.js`)
     );
-    return `${process.execPath} ${program}`;
+    return `"${process.execPath}" "${program}"`;
   }
 }
 
@@ -342,4 +386,5 @@ interface ShellOptions {
   readonly spawnOptions?: SpawnOptions;
   /** @default false */
   readonly quiet?: boolean;
+  readonly extraEnv?: { [name: string]: string | undefined };
 }

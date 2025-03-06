@@ -1,11 +1,10 @@
-import { python } from "../../src";
+import * as TOML from "@iarna/toml";
+import { TestPythonProject } from "./util";
+import * as logging from "../../src/logging";
 import { synthSnapshot } from "../util";
 
 test("poetry enabled", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
@@ -22,37 +21,94 @@ test("poetry enabled", () => {
   expect(snapshot["pyproject.toml"]).toContain(
     "Development Status :: 4 - Beta"
   );
-  expect(snapshot["pyproject.toml"]).toContain('python = "^3.6"'); // default python version
+  expect(snapshot["pyproject.toml"]).toContain('python = "^3.8"'); // default python version
 });
 
-test("poetry enabled with specified python version", () => {
+test("poetry and venv fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        venv: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry and pip fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        pip: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry and setuptools fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        setuptools: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry enabled", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
     license: "Apache-2.0",
     classifiers: ["Development Status :: 4 - Beta"],
   });
-  p.addDependency("python@^3.7,<=3.9");
 
   const snapshot = synthSnapshot(p);
-  expect(snapshot["pyproject.toml"]).toContain('python = "^3.7,<=3.9"');
+  expect(snapshot["pyproject.toml"]).toContain("First Last");
+  expect(snapshot["pyproject.toml"]).toContain("email@example.com");
+  expect(snapshot["pyproject.toml"]).toContain("http://www.example.com");
+  expect(snapshot["pyproject.toml"]).toContain("a short project description");
+  expect(snapshot["pyproject.toml"]).toContain("Apache-2.0");
+  expect(snapshot["pyproject.toml"]).toContain(
+    "Development Status :: 4 - Beta"
+  );
+  expect(snapshot["pyproject.toml"]).toContain('python = "^3.8"'); // default python version
 });
 
-test("poetry enabled with poetry-specific options", () => {
+test("poetry enabled with specified python version", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
     license: "Apache-2.0",
     classifiers: ["Development Status :: 4 - Beta"],
-    deps: ["package1@0.0.1", "package2@0.0.2"],
+  });
+  p.addDependency("python@^3.8,<=3.11");
+
+  const snapshot = synthSnapshot(p);
+  expect(snapshot["pyproject.toml"]).toContain('python = "^3.8,<=3.11"');
+});
+
+describe("poetry enabled with poetry-specific options", () => {
+  const p = new TestPythonProject({
+    poetry: true,
+    homepage: "http://www.example.com",
+    description: "a short project description",
+    license: "Apache-2.0",
+    classifiers: ["Development Status :: 4 - Beta"],
+    deps: ["package1@0.0.1", "package2@0.0.2", "package3"],
     poetryOptions: {
       maintainers: ["First-2 Last-2"],
       repository: "https://github.com/test-python-project",
@@ -86,22 +142,153 @@ test("poetry enabled with poetry-specific options", () => {
       urls: {
         "bug tracker": "https://github.com/test-python-project/issues",
       },
+      packageMode: false,
     },
   });
-
-  expect(synthSnapshot(p)).toMatchSnapshot();
+  const snapshot = synthSnapshot(p);
+  const actualTomlContent = snapshot["pyproject.toml"];
+  const actualObjectContent = TOML.parse(actualTomlContent) as any;
+  it("should match the snapshot", () => {
+    expect(snapshot).toMatchSnapshot();
+  });
+  it("should set package-mode correctly", () => {
+    expect(actualObjectContent.tool.poetry["package-mode"]).toBe(false);
+  });
 });
 
-class TestPythonProject extends python.PythonProject {
-  constructor(options: Partial<python.PythonProjectOptions> = {}) {
-    super({
-      ...options,
-      clobber: false,
-      name: "test-python-project",
-      moduleName: "test_python_project",
-      authorName: "First Last",
-      authorEmail: "email@example.com",
-      version: "0.1.0",
+describe("poetry correctly handles dependencies with toml inline tables", () => {
+  const p = new TestPythonProject({
+    poetry: true,
+    homepage: "http://www.example.com",
+    description: "a short project description",
+    license: "Apache-2.0",
+    classifiers: ["Development Status :: 4 - Beta"],
+    deps: [
+      `package1@{ git = "https://github.com/numpy/numpy.git", tag = "v0.13.2" }`, // `git` dependencies
+      `package2@{ path = "../my-package/", develop = false }`, // `path` dependencies
+      `package3@{ version = "^20.1", extras = ["extra1", "extra2"] }`, // Dependency `extras`
+      `package4@{ version = "^2.2", markers = "python_version <= '3.4' or sys_platform == 'win32'" }`, // Using environment markers
+      `package5@[{ version = "<=1.9", python = ">=3.6,<3.8" }, { version = "^2.0", python = ">=3.8" }]`, // Multiple constraints dependencies
+    ],
+  });
+
+  const snapshot = synthSnapshot(p);
+  const actualTomlContent = snapshot["pyproject.toml"];
+  const actualObjectContent = TOML.parse(actualTomlContent) as any;
+  it("should not have a value for package-mode", () => {
+    expect(actualObjectContent.tool.poetry["package-mode"]).toBeUndefined();
+  });
+  it("should set git dependencies correctly", () => {
+    // Handles TOML table with strings
+    expect(actualObjectContent.tool.poetry.dependencies.package1).toEqual({
+      git: "https://github.com/numpy/numpy.git",
+      tag: "v0.13.2",
     });
+  });
+
+  it("should set path dependencies correctly", () => {
+    // Handles TOML table with boolean
+    expect(actualObjectContent.tool.poetry.dependencies.package2).toEqual({
+      path: "../my-package/",
+      develop: false,
+    });
+  });
+  it("should set extras dependencies correctly", () => {
+    // Handles TOML table with array
+    expect(actualObjectContent.tool.poetry.dependencies.package3).toEqual({
+      version: "^20.1",
+      extras: ["extra1", "extra2"],
+    });
+  });
+  it("should set dependency markers correctly that have both single and double quotes", () => {
+    // Handles TOML table with both single and double quotes
+    expect(actualObjectContent.tool.poetry.dependencies.package4).toEqual({
+      version: "^2.2",
+      markers: "python_version <= '3.4' or sys_platform == 'win32'",
+    });
+  });
+
+  it("should set multiple constraints dependencies correctly", () => {
+    // Handles TOML array of tables
+    expect(actualObjectContent.tool.poetry.dependencies.package5).toEqual([
+      { version: "<=1.9", python: ">=3.6,<3.8" },
+      { version: "^2.0", python: ">=3.8" },
+    ]);
+  });
+  it("should match the snapshot for the pyproject.toml file", () => {
+    expect(actualTomlContent).toMatchSnapshot();
+  });
+});
+
+test("poetry environment is setup with pythonExec", () => {
+  // GIVEN
+  const debug = jest.spyOn(logging, "debug");
+  const p = new TestPythonProject({
+    poetry: true,
+    pythonExec: "python-exec-test-path",
+  });
+
+  // WHEN
+  synthSnapshot(p);
+  try {
+    p.envManager.setupEnvironment();
+  } catch {
+    // we expect this to fail because of the nonsensical python executable
   }
-}
+
+  // THEN
+  expect(debug).toBeCalledWith("poetry env use python-exec-test-path");
+
+  // AFTER
+  debug.mockRestore();
+});
+
+test("generates correct pyproject.toml content", () => {
+  const project = new TestPythonProject({
+    poetry: true,
+    homepage: "http://www.example.com",
+    description: "A short project description",
+    license: "Apache-2.0",
+    deps: ["aws-cdk-lib@^2.128.0"],
+    devDeps: ["black@^24.2.0", "flake8@^7.0.0"],
+  });
+
+  const snapshot = synthSnapshot(project);
+  const actualTomlContent = snapshot["pyproject.toml"];
+
+  const actualContentObject = TOML.parse(actualTomlContent);
+
+  const expectedContentObject = {
+    tool: {
+      poetry: {
+        name: "test-python-project",
+        version: "0.1.0",
+        description: "A short project description",
+        license: "Apache-2.0",
+        authors: ["First Last <email@example.com>"],
+        homepage: "http://www.example.com",
+        readme: "README.md",
+        dependencies: {
+          "aws-cdk-lib": "^2.128.0",
+          python: "^3.8",
+        },
+        group: {
+          dev: {
+            dependencies: {
+              black: "^24.2.0",
+              flake8: "^7.0.0",
+              projen: "99.99.99",
+              pytest: "7.4.3",
+            },
+          },
+        },
+      },
+    },
+    "build-system": {
+      requires: ["poetry-core"],
+      "build-backend": "poetry.core.masonry.api",
+    },
+  };
+
+  expect(actualContentObject).toEqual(expectedContentObject);
+});

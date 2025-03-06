@@ -1,42 +1,59 @@
-import { join } from "path";
-import { BuildWorkflow } from "../build";
-import { PROJEN_DIR, PROJEN_RC } from "../common";
-import {
-  AutoMerge,
-  DependabotOptions,
-  GitHubProject,
-  GitHubProjectOptions,
-  GitIdentity,
-} from "../github";
-import { DEFAULT_GITHUB_ACTIONS_USER } from "../github/constants";
-import { secretToString } from "../github/util";
-import { JobStep, Triggers } from "../github/workflows-model";
-import { IgnoreFile } from "../ignore-file";
-import {
-  Prettier,
-  PrettierOptions,
-  UpgradeDependencies,
-  UpgradeDependenciesOptions,
-} from "../javascript";
-import { License } from "../license";
-import {
-  isAwsCodeArtifactRegistry,
-  Publisher,
-  Release,
-  ReleaseProjectOptions,
-} from "../release";
-import { Task } from "../task";
-import { deepMerge } from "../util";
-import { Version } from "../version";
+import { relative, posix } from "path";
 import { Bundler, BundlerOptions } from "./bundler";
 import { Jest, JestOptions } from "./jest";
+import { LicenseChecker, LicenseCheckerOptions } from "./license-checker";
 import {
+  CodeArtifactAuthProvider as NodePackageCodeArtifactAuthProvider,
   CodeArtifactOptions,
   NodePackage,
   NodePackageManager,
   NodePackageOptions,
 } from "./node-package";
 import { Projenrc, ProjenrcOptions } from "./projenrc";
+import { BuildWorkflow, BuildWorkflowCommonOptions } from "../build";
+import { DEFAULT_ARTIFACTS_DIRECTORY } from "../build/private/consts";
+import { PROJEN_DIR } from "../common";
+import { DependencyType } from "../dependencies";
+import {
+  AutoMerge,
+  DependabotOptions,
+  GitHub,
+  GitHubProject,
+  GitHubProjectOptions,
+  GitIdentity,
+} from "../github";
+import { DEFAULT_GITHUB_ACTIONS_USER } from "../github/constants";
+import { ensureNotHiddenPath, secretToString } from "../github/private/util";
+import {
+  JobPermission,
+  JobPermissions,
+  JobStep,
+  JobStepConfiguration,
+  Triggers,
+} from "../github/workflows-model";
+import { IgnoreFile, IgnoreFileOptions } from "../ignore-file";
+import {
+  NpmConfig,
+  Prettier,
+  PrettierOptions,
+  UpgradeDependencies,
+  UpgradeDependenciesOptions,
+} from "../javascript";
+import { License } from "../license";
+import { ProjenrcJson } from "../projenrc-json";
+import {
+  CodeArtifactAuthProvider as ReleaseCodeArtifactAuthProvider,
+  CodeArtifactAuthProvider,
+  isAwsCodeArtifactRegistry,
+  NpmPublishOptions,
+  Publisher,
+  Release,
+  ReleaseProjectOptions,
+} from "../release";
+import { filteredRunsOnOptions } from "../runner-options";
+import { Task } from "../task";
+import { deepMerge, normalizePersistedPath } from "../util";
+import { ensureRelativePathStartsWithDot } from "../util/path";
 
 const PROJEN_SCRIPT = "projen";
 
@@ -68,7 +85,7 @@ export interface NodeProjectOptions
   /**
    * Indicates of "projen" should be installed as a devDependency.
    *
-   * @default true
+   * @default - true if not a subproject
    */
   readonly projenDevDependency?: boolean;
 
@@ -77,6 +94,10 @@ export interface NodeProjectOptions
    * @default - true if not a subproject
    */
   readonly buildWorkflow?: boolean;
+  /**
+   * Options for PR build workflow.
+   */
+  readonly buildWorkflowOptions?: BuildWorkflowOptions;
 
   /**
    * Automatically update files modified during builds to pull-request branches. This means
@@ -86,13 +107,15 @@ export interface NodeProjectOptions
    * Implies that PR builds do not have anti-tamper checks.
    *
    * @default true
+   *
+   * @deprecated - Use `buildWorkflowOptions.mutableBuild`
    */
   readonly mutableBuild?: boolean;
 
   /**
    * Define a GitHub workflow step for sending code coverage metrics to https://codecov.io/
-   * Uses codecov/codecov-action@v1
-   * A secret is required for private repos. Configured with @codeCovTokenSecret
+   * Uses codecov/codecov-action@v4
+   * A secret is required for private repos. Configured with `@codeCovTokenSecret`
    * @default false
    */
   readonly codeCov?: boolean;
@@ -147,11 +170,20 @@ export interface NodeProjectOptions
   readonly releaseToNpm?: boolean;
 
   /**
-   * The node version to use in GitHub workflows.
+   * The node version used in GitHub Actions workflows.
    *
-   * @default - same as `minNodeVersion`
+   * Always use this option if your GitHub Actions workflows require a specific to run.
+   *
+   * @default - `minNodeVersion` if set, otherwise `lts/*`.
    */
   readonly workflowNodeVersion?: string;
+
+  /**
+   * Enable Node.js package cache in GitHub workflows.
+   *
+   * @default false
+   */
+  readonly workflowPackageCache?: boolean;
 
   /**
    * Use dependabot to handle dependency upgrades.
@@ -169,7 +201,7 @@ export interface NodeProjectOptions
   readonly dependabotOptions?: DependabotOptions;
 
   /**
-   * Use github workflows to handle dependency upgrades.
+   * Use tasks and github workflows to handle dependency upgrades.
    * Cannot be used in conjunction with `dependabot`.
    *
    * @default true
@@ -200,6 +232,11 @@ export interface NodeProjectOptions
    * @default true
    */
   readonly npmignoreEnabled?: boolean;
+
+  /**
+   * Configuration options for .npmignore file
+   */
+  readonly npmIgnoreOptions?: IgnoreFileOptions;
 
   /**
    * Additional entries to .npmignore.
@@ -288,8 +325,35 @@ export interface NodeProjectOptions
   /**
    * Build workflow triggers
    * @default "{ pullRequest: {}, workflowDispatch: {} }"
+   *
+   * @deprecated - Use `buildWorkflowOptions.workflowTriggers`
    */
   readonly buildWorkflowTriggers?: Triggers;
+
+  /**
+   * Configure which licenses should be deemed acceptable for use by dependencies
+   *
+   * This setting will cause the build to fail, if any prohibited or not allowed licenses ares encountered.
+   *
+   * @default - no license checks are run during the build and all licenses will be accepted
+   */
+  readonly checkLicenses?: LicenseCheckerOptions;
+}
+
+/**
+ * Build workflow options for NodeProject
+ */
+export interface BuildWorkflowOptions extends BuildWorkflowCommonOptions {
+  /**
+   * Automatically update files modified during builds to pull-request branches.
+   * This means that any files synthesized by projen or e.g. test snapshots will
+   * always be up-to-date before a PR is merged.
+   *
+   * Implies that PR builds do not have anti-tamper checks.
+   *
+   * @default true
+   */
+  readonly mutableBuild?: boolean;
 }
 
 /**
@@ -308,7 +372,7 @@ export enum AutoRelease {
 }
 
 /**
- * Node.js project
+ * Node.js project.
  *
  * @pjid node
  */
@@ -322,6 +386,17 @@ export class NodeProject extends GitHubProject {
    * The .npmignore file.
    */
   public readonly npmignore?: IgnoreFile;
+
+  /**
+   * The .npmrc file
+   */
+  public get npmrc(): NpmConfig {
+    if (!this._npmrc) {
+      this._npmrc = new NpmConfig(this, { omitEmpty: true });
+    }
+    return this._npmrc;
+  }
+  private _npmrc?: NpmConfig;
 
   /**
    * @deprecated use `package.allowLibraryDependencies`
@@ -361,20 +436,24 @@ export class NodeProject extends GitHubProject {
   public readonly release?: Release;
 
   /**
-   * Minimum node.js version required by this package.
+   * The minimum node version required by this package to function.
+   *
+   * This value indicates the package is incompatible with older versions.
    */
   public get minNodeVersion(): string | undefined {
     return this.package.minNodeVersion;
   }
 
   /**
-   * Maximum node version required by this pacakge.
+   * Maximum node version supported by this package.
+   *
+   * The value indicates the package is incompatible with newer versions.
    */
   public get maxNodeVersion(): string | undefined {
     return this.package.maxNodeVersion;
   }
 
-  private readonly nodeVersion?: string;
+  protected readonly nodeVersion?: string;
 
   /**
    * The package manager to use.
@@ -421,30 +500,60 @@ export class NodeProject extends GitHubProject {
    */
   public readonly upgradeWorkflow?: UpgradeDependencies;
 
-  private readonly workflowBootstrapSteps: JobStep[];
+  protected readonly workflowBootstrapSteps: JobStep[];
   private readonly workflowGitIdentity: GitIdentity;
+  protected readonly workflowPackageCache: boolean;
   public readonly prettier?: Prettier;
 
   constructor(options: NodeProjectOptions) {
-    super(options);
+    super({
+      ...options,
+      // Node projects have the specific projen version locked via lockfile, so we can skip the @<VERSION> part of the top-level project
+      projenCommand: options.projenCommand ?? "npx projen",
+    });
 
     this.package = new NodePackage(this, options);
     this.workflowBootstrapSteps = options.workflowBootstrapSteps ?? [];
     this.workflowGitIdentity =
       options.workflowGitIdentity ?? DEFAULT_GITHUB_ACTIONS_USER;
-    this.artifactsDirectory = options.artifactsDirectory ?? "dist";
-    this.artifactsJavascriptDirectory = join(this.artifactsDirectory, "js");
+    this.workflowPackageCache = options.workflowPackageCache ?? false;
+    this.artifactsDirectory =
+      options.artifactsDirectory ?? DEFAULT_ARTIFACTS_DIRECTORY;
+    ensureNotHiddenPath(this.artifactsDirectory, "artifactsDirectory");
+    const normalizedArtifactsDirectory = normalizePersistedPath(
+      this.artifactsDirectory
+    );
+    this.artifactsJavascriptDirectory = posix.join(
+      normalizedArtifactsDirectory,
+      "js"
+    );
 
     this.runScriptCommand = (() => {
       switch (this.packageManager) {
         case NodePackageManager.NPM:
           return "npm run";
         case NodePackageManager.YARN:
+        case NodePackageManager.YARN2:
+        case NodePackageManager.YARN_CLASSIC:
+        case NodePackageManager.YARN_BERRY:
           return "yarn run";
         case NodePackageManager.PNPM:
           return "pnpm run";
+        case NodePackageManager.BUN:
+          return "bun run";
         default:
           throw new Error(`unexpected package manager ${this.packageManager}`);
+      }
+    })();
+
+    const envCommand = (() => {
+      switch (this.packageManager) {
+        case NodePackageManager.PNPM:
+          return '$(pnpm -c exec "node --print process.env.PATH")';
+        case NodePackageManager.BUN:
+          return '$(bun --eval "console.log(process.env.PATH)")';
+        default:
+          return '$(npx -c "node --print process.env.PATH")';
       }
     })();
 
@@ -452,15 +561,16 @@ export class NodeProject extends GitHubProject {
       options.workflowNodeVersion ?? this.package.minNodeVersion;
 
     // add PATH for all tasks which includes the project's npm .bin list
-    this.tasks.addEnvironment(
-      "PATH",
-      '$(npx -c "node -e \\"console.log(process.env.PATH)\\"")'
-    );
+    this.tasks.addEnvironment("PATH", envCommand);
 
     this.addLicense(options);
 
     if (options.npmignoreEnabled ?? true) {
-      this.npmignore = new IgnoreFile(this, ".npmignore");
+      this.npmignore = new IgnoreFile(
+        this,
+        ".npmignore",
+        options.npmIgnoreOptions
+      );
     }
 
     this.addDefaultGitIgnore();
@@ -487,14 +597,22 @@ export class NodeProject extends GitHubProject {
       this.setScript(PROJEN_SCRIPT, this.package.projenCommand);
     }
 
-    this.npmignore?.exclude(`/${PROJEN_RC}`);
     this.npmignore?.exclude(`/${PROJEN_DIR}/`);
-    this.gitignore.include(`/${PROJEN_RC}`);
 
-    const projen = options.projenDevDependency ?? true;
+    const projen = options.projenDevDependency ?? (this.parent ? false : true);
     if (projen && !this.ejected) {
       const postfix = options.projenVersion ? `@${options.projenVersion}` : "";
       this.addDevDeps(`projen${postfix}`);
+
+      if (
+        !this.deps.isDependencySatisfied(
+          "constructs",
+          DependencyType.BUILD,
+          "^10.0.0"
+        )
+      ) {
+        this.addDevDeps(`constructs@^10.0.0`);
+      }
     }
 
     if (!options.defaultReleaseBranch) {
@@ -511,19 +629,40 @@ export class NodeProject extends GitHubProject {
       this.jest = new Jest(this, options.jestOptions);
     }
 
-    if (buildEnabled && this.github) {
+    const requiresIdTokenPermission =
+      (options.scopedPackagesOptions ?? []).length > 0 &&
+      options.codeArtifactOptions?.authProvider ===
+        CodeArtifactAuthProvider.GITHUB_OIDC;
+
+    const workflowPermissions: JobPermissions = {
+      idToken: requiresIdTokenPermission ? JobPermission.WRITE : undefined,
+    };
+
+    const buildWorkflowOptions: BuildWorkflowOptions =
+      options.buildWorkflowOptions ?? {};
+
+    if (buildEnabled && (this.github || GitHub.of(this.root))) {
       this.buildWorkflow = new BuildWorkflow(this, {
         buildTask: this.buildTask,
         artifactsDirectory: this.artifactsDirectory,
         containerImage: options.workflowContainerImage,
         gitIdentity: this.workflowGitIdentity,
         mutableBuild: options.mutableBuild,
-        preBuildSteps: this.renderWorkflowSetup({
-          mutable: options.mutableBuild ?? true,
-        }),
-        postBuildSteps: options.postBuildSteps,
-        runsOn: options.workflowRunsOn,
         workflowTriggers: options.buildWorkflowTriggers,
+        permissions: workflowPermissions,
+        ...buildWorkflowOptions,
+        preBuildSteps: this.renderWorkflowSetup({
+          installStepConfiguration: {
+            workingDirectory: this.determineInstallWorkingDirectory(),
+          },
+          mutable:
+            buildWorkflowOptions.mutableBuild ?? options.mutableBuild ?? true,
+        }).concat(buildWorkflowOptions.preBuildSteps ?? []),
+        postBuildSteps: [...(options.postBuildSteps ?? [])],
+        ...filteredRunsOnOptions(
+          options.workflowRunsOn,
+          options.workflowRunsOnGroup
+        ),
       });
 
       this.buildWorkflow.addPostBuildSteps(
@@ -536,41 +675,63 @@ export class NodeProject extends GitHubProject {
       options.releaseWorkflow ??
       (this.parent ? false : true);
     if (release) {
-      this.addDevDeps(Version.STANDARD_VERSION);
-
       this.release = new Release(this, {
         versionFile: "package.json", // this is where "version" is set after bump
         task: this.buildTask,
         branch: options.defaultReleaseBranch ?? "main",
-        artifactsDirectory: this.artifactsDirectory,
         ...options,
 
+        artifactsDirectory: this.artifactsDirectory,
         releaseWorkflowSetupSteps: [
-          ...this.renderWorkflowSetup({ mutable: false }),
+          ...this.renderWorkflowSetup({
+            installStepConfiguration: {
+              workingDirectory: this.determineInstallWorkingDirectory(),
+            },
+            mutable: false,
+          }),
           ...(options.releaseWorkflowSetupSteps ?? []),
         ],
         postBuildSteps: [
           ...(options.postBuildSteps ?? []),
           ...this.renderUploadCoverageJobStep(options),
         ],
+
+        workflowNodeVersion: this.nodeVersion,
+        workflowPermissions,
       });
 
       this.publisher = this.release.publisher;
 
+      const nodePackageToReleaseCodeArtifactAuthProviderMapping: Record<
+        NodePackageCodeArtifactAuthProvider,
+        ReleaseCodeArtifactAuthProvider
+      > = {
+        [NodePackageCodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR]:
+          ReleaseCodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR,
+        [NodePackageCodeArtifactAuthProvider.GITHUB_OIDC]:
+          ReleaseCodeArtifactAuthProvider.GITHUB_OIDC,
+      };
+
       if (options.releaseToNpm ?? false) {
-        const codeArtifactOptions = isAwsCodeArtifactRegistry(
-          this.package.npmRegistry
-        )
-          ? {
-              accessKeyIdSecret: options.codeArtifactOptions?.accessKeyIdSecret,
-              secretAccessKeySecret:
-                options.codeArtifactOptions?.secretAccessKeySecret,
-              roleToAssume: options.codeArtifactOptions?.roleToAssume,
-            }
-          : {};
+        const codeArtifactOptions: NpmPublishOptions["codeArtifactOptions"] =
+          isAwsCodeArtifactRegistry(this.package.npmRegistry)
+            ? {
+                accessKeyIdSecret:
+                  options.codeArtifactOptions?.accessKeyIdSecret,
+                secretAccessKeySecret:
+                  options.codeArtifactOptions?.secretAccessKeySecret,
+                roleToAssume: options.codeArtifactOptions?.roleToAssume,
+                authProvider: options.codeArtifactOptions?.authProvider
+                  ? nodePackageToReleaseCodeArtifactAuthProviderMapping[
+                      options.codeArtifactOptions.authProvider
+                    ]
+                  : ReleaseCodeArtifactAuthProvider.ACCESS_AND_SECRET_KEY_PAIR,
+              }
+            : {};
         this.release.publisher.publishToNpm({
           registry: this.package.npmRegistry,
           npmTokenSecret: this.package.npmTokenSecret,
+          npmProvenance: this.package.npmProvenance,
           codeArtifactOptions,
         });
       }
@@ -649,6 +810,7 @@ export class NodeProject extends GitHubProject {
             : undefined,
           labels: autoApproveLabel(depsAutoApprove),
           gitIdentity: this.workflowGitIdentity,
+          permissions: workflowPermissions,
         },
       };
       this.upgradeWorkflow = new UpgradeDependencies(
@@ -664,26 +826,59 @@ export class NodeProject extends GitHubProject {
     }
 
     const projenrcJs = options.projenrcJs ?? !options.projenrcJson;
-    if (projenrcJs) {
-      new Projenrc(this, options.projenrcJsOptions);
+    if (!this.parent && projenrcJs) {
+      const projenrcJsFile = new Projenrc(this, options.projenrcJsOptions);
+
+      this.npmignore?.exclude(`/${projenrcJsFile.filePath}`);
+    } else if (options.projenrcJson) {
+      const projenrcJsonFile = ProjenrcJson.of(this);
+      if (projenrcJsonFile) {
+        this.npmignore?.exclude(`/${projenrcJsonFile.filePath}`);
+      }
     }
 
     // add a bundler component - this enables things like Lambda bundling and in the future web bundling.
     this.bundler = new Bundler(this, options.bundlerOptions);
 
-    if (options.package ?? true) {
+    const shouldPackage = options.package ?? true;
+    if (release && !shouldPackage) {
+      this.logger.warn(
+        "When `release` is enabled, `package` must also be enabled as it is required by release. Force enabling `package`."
+      );
+    }
+    if (release || shouldPackage) {
       this.packageTask.exec(`mkdir -p ${this.artifactsJavascriptDirectory}`);
 
-      // always use npm here - yarn doesn't add much value
-      // sadly we cannot use --pack-destination because it is not supported by older npm
+      const pkgMgr =
+        this.package.packageManager === NodePackageManager.PNPM
+          ? "pnpm"
+          : "npm";
       this.packageTask.exec(
-        `mv $(npm pack) ${this.artifactsJavascriptDirectory}/`
+        `${pkgMgr} pack --pack-destination ${this.artifactsJavascriptDirectory}`
       );
     }
 
     if (options.prettier ?? false) {
       this.prettier = new Prettier(this, { ...options.prettierOptions });
     }
+
+    // For PNPM, the default resolution mode is "lowest", which leads to any non-versioned (ie '*') dependencies being
+    // resolved to the lowest available version, which is unlikely to be expected behaviour for users. We set resolution
+    // mode to "highest" to match the behaviour of yarn and npm.
+    if (this.package.packageManager === NodePackageManager.PNPM) {
+      this.npmrc.addConfig("resolution-mode", "highest");
+    }
+
+    if (options.checkLicenses) {
+      new LicenseChecker(this, options.checkLicenses);
+    }
+  }
+
+  private determineInstallWorkingDirectory(): string | undefined {
+    if (this.parent) {
+      return ensureRelativePathStartsWithDot(relative(".", this.root.outdir));
+    }
+    return;
   }
 
   private renderUploadCoverageJobStep(options: NodeProjectOptions): JobStep[] {
@@ -693,7 +888,7 @@ export class NodeProject extends GitHubProject {
       return [
         {
           name: "Upload coverage to Codecov",
-          uses: "codecov/codecov-action@v1",
+          uses: "codecov/codecov-action@v4",
           with: options.codeCovTokenSecret
             ? {
                 token: `\${{ secrets.${options.codeCovTokenSecret} }}`,
@@ -724,6 +919,16 @@ export class NodeProject extends GitHubProject {
   }
 
   /**
+   * Replaces the contents of multiple npm package.json scripts.
+   * @param scripts The scripts to set
+   */
+  public addScripts(scripts: { [name: string]: string }) {
+    for (const [name, command] of Object.entries(scripts)) {
+      this.package.setScript(name, command);
+    }
+  }
+
+  /**
    * Removes the npm script (always successful).
    * @param name The name of the script.
    */
@@ -734,6 +939,7 @@ export class NodeProject extends GitHubProject {
   /**
    * Indicates if a script by the name name is defined.
    * @param name The name of the script
+   * @deprecated Use `project.tasks.tryFind(name)`
    */
   public hasScript(name: string) {
     return this.package.hasScript(name);
@@ -792,13 +998,35 @@ export class NodeProject extends GitHubProject {
       secretAccessKeySecret:
         codeArtifactOptions?.secretAccessKeySecret ?? "AWS_SECRET_ACCESS_KEY",
       roleToAssume: codeArtifactOptions?.roleToAssume,
+      authProvider: codeArtifactOptions?.authProvider,
     };
+
+    if (
+      parsedCodeArtifactOptions.authProvider ===
+      NodePackageCodeArtifactAuthProvider.GITHUB_OIDC
+    ) {
+      return [
+        {
+          name: "Configure AWS Credentials",
+          uses: "aws-actions/configure-aws-credentials@v4",
+          with: {
+            "aws-region": "us-east-2",
+            "role-to-assume": parsedCodeArtifactOptions.roleToAssume,
+            "role-duration-seconds": 900,
+          },
+        },
+        {
+          name: "AWS CodeArtifact Login",
+          run: `${this.runScriptCommand} ca:login`,
+        },
+      ];
+    }
 
     if (parsedCodeArtifactOptions.roleToAssume) {
       return [
         {
           name: "Configure AWS Credentials",
-          uses: "aws-actions/configure-aws-credentials@v1",
+          uses: "aws-actions/configure-aws-credentials@v4",
           with: {
             "aws-access-key-id": secretToString(
               parsedCodeArtifactOptions.accessKeyIdSecret
@@ -849,20 +1077,49 @@ export class NodeProject extends GitHubProject {
     // first run the workflow bootstrap steps
     install.push(...this.workflowBootstrapSteps);
 
-    if (this.nodeVersion) {
-      install.push({
-        name: "Setup Node.js",
-        uses: "actions/setup-node@v3",
-        with: { "node-version": this.nodeVersion },
-      });
-    }
-
     if (this.package.packageManager === NodePackageManager.PNPM) {
       install.push({
         name: "Setup pnpm",
-        uses: "pnpm/action-setup@v2.0.1",
-        with: { version: "6.14.7" }, // current latest. Should probably become tunable.
+        uses: "pnpm/action-setup@v3",
+        with: { version: this.package.pnpmVersion },
       });
+    } else if (this.package.packageManager === NodePackageManager.BUN) {
+      install.push({
+        name: "Setup bun",
+        uses: "oven-sh/setup-bun@v2",
+        with: { "bun-version": this.package.bunVersion },
+      });
+    }
+
+    if (this.package.packageManager !== NodePackageManager.BUN) {
+      if (this.nodeVersion || this.workflowPackageCache) {
+        const cache =
+          this.package.packageManager === NodePackageManager.YARN
+            ? "yarn"
+            : this.package.packageManager === NodePackageManager.YARN2
+            ? "yarn"
+            : this.package.packageManager === NodePackageManager.YARN_CLASSIC
+            ? "yarn"
+            : this.package.packageManager === NodePackageManager.YARN_BERRY
+            ? "yarn"
+            : this.packageManager === NodePackageManager.BUN
+            ? "bun"
+            : this.package.packageManager === NodePackageManager.PNPM
+            ? "pnpm"
+            : "npm";
+        install.push({
+          name: "Setup Node.js",
+          uses: "actions/setup-node@v4",
+          with: {
+            ...(this.nodeVersion && {
+              "node-version": this.nodeVersion,
+            }),
+            ...(this.workflowPackageCache && {
+              cache,
+            }),
+          },
+        });
+      }
     }
 
     const mutable = options.mutable ?? false;
@@ -878,6 +1135,7 @@ export class NodeProject extends GitHubProject {
       run: mutable
         ? this.package.installAndUpdateLockfileCommand
         : this.package.installCommand,
+      ...(options.installStepConfiguration ?? {}),
     });
 
     return install;
@@ -942,7 +1200,15 @@ export class NodeProject extends GitHubProject {
     return this.package.addBundledDeps(...deps);
   }
 
-  public addPackageIgnore(pattern: string) {
+  /**
+   * Adds patterns to be ignored by npm.
+   *
+   * @param pattern The pattern to ignore.
+   *
+   * @remarks
+   * If you are having trouble getting an ignore to populate, try using your construct or component's preSynthesize method to properly delay calling this method.
+   */
+  public override addPackageIgnore(pattern: string): void {
     this.npmignore?.addPatterns(pattern);
   }
 
@@ -1028,11 +1294,20 @@ export class NodeProject extends GitHubProject {
 }
 
 /**
- * Options for `renderInstallSteps()`.
+ * Options for `renderWorkflowSetup()`.
  */
 export interface RenderWorkflowSetupOptions {
   /**
-   * Should the pacakge lockfile be updated?
+   * Configure the install step in the workflow setup.
+   *
+   * @default - `{ name: "Install dependencies" }`
+   *
+   * @example - { workingDirectory: "rootproject-dir" } for subprojects installing from root.
+   * @example - { env: { NPM_TOKEN: "token" }} for installing from private npm registry.
+   */
+  readonly installStepConfiguration?: JobStepConfiguration;
+  /**
+   * Should the package lockfile be updated?
    * @default false
    */
   readonly mutable?: boolean;

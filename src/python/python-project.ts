@@ -1,10 +1,3 @@
-import { GitHubProject, GitHubProjectOptions } from "../github";
-import {
-  Projenrc as ProjenrcJs,
-  ProjenrcOptions as ProjenrcJsOptions,
-} from "../javascript/projenrc";
-import { ProjectType } from "../project";
-import { anySelected, multipleSelected } from "../util";
 import { Pip } from "./pip";
 import { Poetry } from "./poetry";
 import {
@@ -19,16 +12,33 @@ import { IPythonPackaging, PythonPackagingOptions } from "./python-packaging";
 import { PythonSample } from "./python-sample";
 import { Setuptools } from "./setuptools";
 import { Venv, VenvOptions } from "./venv";
+import { GitHubProject, GitHubProjectOptions } from "../github";
+import {
+  Projenrc as ProjenrcJs,
+  ProjenrcOptions as ProjenrcJsOptions,
+} from "../javascript/projenrc";
+import { ProjectType } from "../project";
+import { ProjenrcTs, ProjenrcTsOptions } from "../typescript";
+import { anySelected, multipleSelected } from "../util";
 
 /** Allowed characters in python project names */
 const PYTHON_PROJECT_NAME_REGEX = /^[A-Za-z0-9-_\.]+$/;
+
+export interface PythonExecutableOptions {
+  /**
+   * Path to the python executable to use.
+   * @default "python"
+   */
+  readonly pythonExec?: string;
+}
 
 /**
  * Options for `PythonProject`.
  */
 export interface PythonProjectOptions
   extends GitHubProjectOptions,
-    PythonPackagingOptions {
+    PythonPackagingOptions,
+    PythonExecutableOptions {
   // -- required options --
 
   /**
@@ -71,7 +81,7 @@ export interface PythonProjectOptions
   /**
    * Use pip with a requirements.txt file to track project dependencies.
    *
-   * @default true
+   * @default - true, unless poetry is true, then false
    * @featured
    */
   readonly pip?: boolean;
@@ -79,7 +89,7 @@ export interface PythonProjectOptions
   /**
    * Use venv to manage a virtual environment for installing dependencies inside.
    *
-   * @default true
+   * @default - true, unless poetry is true, then false
    * @featured
    */
   readonly venv?: boolean;
@@ -93,7 +103,7 @@ export interface PythonProjectOptions
   /**
    * Use setuptools with a setup.py script for packaging and publishing.
    *
-   * @default - true if the project type is library
+   * @default - true, unless poetry is true, then false
    * @featured
    */
   readonly setuptools?: boolean;
@@ -101,6 +111,9 @@ export interface PythonProjectOptions
   /**
    * Use poetry to manage your project dependencies, virtual environment, and
    * (optional) packaging/publishing.
+   *
+   * This feature is incompatible with pip, setuptools, or venv.
+   * If you set this option to `true`, then pip, setuptools, and venv must be set to `false`.
    *
    * @default false
    * @featured
@@ -127,6 +140,13 @@ export interface PythonProjectOptions
    * @default true
    */
   readonly sample?: boolean;
+
+  /**
+   * Location of sample tests.
+   * Typically the same directory where project tests will be located.
+   * @default "tests"
+   */
+  readonly sampleTestdir?: string;
 
   /**
    * Use projenrc in Python.
@@ -159,6 +179,22 @@ export interface PythonProjectOptions
    * @default - default options
    */
   readonly projenrcJsOptions?: ProjenrcJsOptions;
+
+  /**
+   * Use projenrc in TypeScript.
+   *
+   * This will create a tsconfig file (default: `tsconfig.projen.json`)
+   * and use `ts-node` in the default task to parse the project source files.
+   *
+   * @default false
+   */
+  readonly projenrcTs?: boolean;
+
+  /**
+   * Options related to projenrc in TypeScript.
+   * @default - default options
+   */
+  readonly projenrcTsOptions?: ProjenrcTsOptions;
 }
 
 /**
@@ -198,6 +234,12 @@ export class PythonProject extends GitHubProject {
    */
   public pytest?: Pytest;
 
+  /**
+   * Directory where sample tests are located.
+   * @default "tests"
+   */
+  public readonly sampleTestdir: string;
+
   constructor(options: PythonProjectOptions) {
     super(options);
 
@@ -209,37 +251,63 @@ export class PythonProject extends GitHubProject {
 
     this.moduleName = options.moduleName;
     this.version = options.version;
+    this.sampleTestdir = options.sampleTestdir ?? "tests";
 
     const rcFileTypeOptions = [
       options.projenrcPython,
       options.projenrcJs,
       options.projenrcJson,
+      options.projenrcTs,
     ];
 
     if (multipleSelected(rcFileTypeOptions)) {
       throw new Error(
-        "Only one of projenrcPython, projenrcJs, and projenrcJson can be selected."
+        "Only one of projenrcPython, projenrcJs, projenrcTs, and projenrcJson can be selected."
       );
     }
 
-    // default to projenrc.py if no other projenrc type was elected
-    if (options.projenrcPython ?? !anySelected(rcFileTypeOptions)) {
-      new ProjenrcPython(this, options.projenrcPythonOptions);
+    const poetry = options.poetry ?? false;
+    const pip = options.pip ?? !poetry;
+    const venv = options.venv ?? !poetry;
+    const setuptools =
+      options.setuptools ?? (!poetry && this.projectType === ProjectType.LIB);
+
+    if (poetry && (pip || venv || setuptools)) {
+      throw new Error(
+        "poetry is true - pip, venv, and setuptools must be undefined or false"
+      );
     }
 
-    if (options.projenrcJs ?? false) {
-      new ProjenrcJs(this, options.projenrcJsOptions);
+    if (!this.parent) {
+      // default to projenrc.py if no other projenrc type was elected
+      if (options.projenrcPython ?? !anySelected(rcFileTypeOptions)) {
+        new ProjenrcPython(this, {
+          pythonExec: options.pythonExec,
+          ...options.projenrcPythonOptions,
+        });
+      }
+
+      if (options.projenrcJs ?? false) {
+        new ProjenrcJs(this, options.projenrcJsOptions);
+      }
+
+      if (options.projenrcTs ?? false) {
+        new ProjenrcTs(this, options.projenrcTsOptions);
+      }
     }
 
-    if (options.venv ?? true) {
-      this.envManager = new Venv(this, options.venvOptions);
+    if (venv) {
+      this.envManager = new Venv(this, {
+        pythonExec: options.pythonExec,
+        ...options.venvOptions,
+      });
     }
 
-    if (options.pip ?? true) {
+    if (pip) {
       this.depsManager = new Pip(this);
     }
 
-    if (options.setuptools ?? this.projectType === ProjectType.LIB) {
+    if (setuptools) {
       this.packagingManager = new Setuptools(this, {
         version: options.version,
         description: options.description,
@@ -249,21 +317,12 @@ export class PythonProject extends GitHubProject {
         homepage: options.homepage,
         classifiers: options.classifiers,
         setupConfig: options.setupConfig,
+        pythonExec: options.pythonExec,
       });
     }
 
-    // if (options.conda ?? false) {
-    //   this.depsManager = new Conda(this, options);
-    //   this.envManager = this.depsManager;
-    // }
-
-    // if (options.pipenv ?? false) {
-    //   this.depsManager = new Pipenv(this, options);
-    //   this.envManager = this.depsManager;
-    // }
-
-    if (options.poetry ?? false) {
-      const poetry = new Poetry(this, {
+    if (poetry) {
+      const poetryProject = new Poetry(this, {
         version: options.version,
         description: options.description,
         authorName: options.authorName,
@@ -271,14 +330,15 @@ export class PythonProject extends GitHubProject {
         license: options.license,
         homepage: options.homepage,
         classifiers: options.classifiers,
+        pythonExec: options.pythonExec,
         poetryOptions: {
           readme: options.readme?.filename ?? "README.md",
           ...options.poetryOptions,
         },
       });
-      this.depsManager = poetry;
-      this.envManager = poetry;
-      this.packagingManager = poetry;
+      this.depsManager = poetryProject;
+      this.envManager = poetryProject;
+      this.packagingManager = poetryProject;
     }
 
     if (!this.envManager) {
@@ -299,22 +359,19 @@ export class PythonProject extends GitHubProject {
       );
     }
 
-    if (Number(options.venv ?? true) + Number(options.poetry ?? false) > 1) {
+    if (Number(venv) + Number(poetry) > 1) {
       throw new Error(
         "More than one component has been chosen for managing the environment (venv, conda, pipenv, or poetry)"
       );
     }
 
-    if (Number(options.pip ?? true) + Number(options.poetry ?? false) > 1) {
+    if (Number(pip) + Number(poetry) > 1) {
       throw new Error(
         "More than one component has been chosen for managing dependencies (pip, conda, pipenv, or poetry)"
       );
     }
 
-    if (
-      Number(options.setuptools ?? true) + Number(options.poetry ?? false) >
-      1
-    ) {
+    if (Number(setuptools) + Number(poetry) > 1) {
       throw new Error(
         "More than one component has been chosen for managing packaging (setuptools or poetry)"
       );
@@ -322,10 +379,12 @@ export class PythonProject extends GitHubProject {
 
     if (options.pytest ?? true) {
       this.pytest = new Pytest(this, options.pytestOptions);
-      new PytestSample(this, {
-        moduleName: this.moduleName,
-        testdir: this.pytest.testdir,
-      });
+      if (options.sample ?? true) {
+        new PytestSample(this, {
+          moduleName: this.moduleName,
+          testdir: this.sampleTestdir,
+        });
+      }
     }
 
     if (options.sample ?? true) {

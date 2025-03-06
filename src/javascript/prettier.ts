@@ -1,9 +1,10 @@
 import { Component } from "../component";
-import { IgnoreFile } from "../ignore-file";
+import { IgnoreFile, IgnoreFileOptions } from "../ignore-file";
 import { NodeProject } from "../javascript";
 import { JsonFile } from "../json";
 import { Project } from "../project";
 import { SourceCode } from "../source-code";
+import { YamlFile } from "../yaml";
 /**
  * Options for Prettier
  *
@@ -15,6 +16,11 @@ export interface PrettierOptions {
    * @default true
    */
   readonly ignoreFile?: boolean;
+
+  /**
+   * Configuration options for .prettierignore file
+   */
+  readonly ignoreFileOptions?: IgnoreFileOptions;
 
   /**
    * Prettier settings.
@@ -29,6 +35,12 @@ export interface PrettierOptions {
    * @see https://prettier.io/docs/en/configuration.html#configuration-overrides
    */
   readonly overrides?: PrettierOverride[];
+
+  /**
+   * Write prettier configuration as YAML instead of JSON
+   * @default false
+   */
+  readonly yaml?: boolean;
 }
 /**
  * Options to set in Prettier directly or through overrides
@@ -274,7 +286,7 @@ export interface PrettierOverride {
   /**
    * The options to apply for this override.
    */
-  readonly settings: PrettierSettings;
+  readonly options: PrettierSettings;
 }
 
 /**
@@ -366,7 +378,13 @@ export class Prettier extends Component {
     this._overrides = options.overrides ?? [];
 
     if (options.ignoreFile ?? true) {
-      this.ignoreFile = new IgnoreFile(project, ".prettierignore");
+      this.ignoreFile = new IgnoreFile(
+        project,
+        ".prettierignore",
+        options.ignoreFileOptions
+      );
+
+      project.addPackageIgnore("/.prettierignore");
     }
 
     project.addDevDeps("prettier");
@@ -375,10 +393,19 @@ export class Prettier extends Component {
       ...options.settings,
     };
 
-    new JsonFile(project, ".prettierrc.json", {
-      obj: () => ({ ...this.settings, overrides: [...this._overrides] }),
-      marker: false,
-    });
+    if (options.yaml) {
+      new YamlFile(project, ".prettierrc.yml", {
+        obj: () => ({ ...this.settings, overrides: [...this._overrides] }),
+        marker: true,
+      });
+      project.addPackageIgnore("/.prettierrc.yml");
+    } else {
+      new JsonFile(project, ".prettierrc.json", {
+        obj: () => ({ ...this.settings, overrides: [...this._overrides] }),
+        marker: false,
+      });
+      project.addPackageIgnore("/.prettierrc.json");
+    }
   }
 
   /**
@@ -387,7 +414,7 @@ export class Prettier extends Component {
    * @param {PrettierOverride} override
    */
   public addOverride(override: PrettierOverride) {
-    this.overrides.push(override);
+    this._overrides.push(override);
   }
 
   /**
@@ -401,7 +428,7 @@ export class Prettier extends Component {
   }
 
   /**
-   *  Access to the Prettieroverrides to extend those
+   *  Returns all Prettier overrides
    */
   public get overrides() {
     return [...this._overrides];

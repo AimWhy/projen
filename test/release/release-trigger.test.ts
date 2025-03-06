@@ -73,6 +73,20 @@ describe("continuous release", () => {
   test("does not have a changelog", () => {
     expect(releaseTrigger.changelogPath).toBeUndefined();
   });
+
+  test("does not set path by default", () => {
+    expect(releaseTrigger.paths).toBeUndefined();
+  });
+
+  describe("path configuration", () => {
+    beforeAll(() => {
+      releaseTrigger = ReleaseTrigger.continuous({ paths: ["foo/**"] });
+    });
+
+    test("it has path configured", () => {
+      expect(releaseTrigger.paths).toEqual(["foo/**"]);
+    });
+  });
 });
 
 describe("scheduled release", () => {
@@ -98,5 +112,15 @@ describe("scheduled release", () => {
 
   test("does not have a changelog", () => {
     expect(releaseTrigger.changelogPath).toBeUndefined();
+  });
+});
+
+describe("workflowdispatch release", () => {
+  const trigger = ReleaseTrigger.workflowDispatch();
+
+  test("is not manual", () => {
+    // Well it is, but not for what this property is used for, which is to determine
+    // whether a local `yarn release` task needs to be generated.
+    expect(trigger.isManual).toEqual(false);
   });
 });

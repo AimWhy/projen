@@ -4,14 +4,14 @@ import { ConstructLibrary, ConstructLibraryOptions } from "../cdk";
 export interface ConstructLibraryCdktfOptions extends ConstructLibraryOptions {
   /**
    * Minimum target version this library is tested against.
-   * @default "^0.8.3"
+   * @default "^0.13.0"
    * @featured
    */
   readonly cdktfVersion: string;
 
   /**
    * Construct version to use
-   * @default "^10.0.12"
+   * @default "^10.3.0"
    */
   readonly constructsVersion?: string;
 }
@@ -39,7 +39,7 @@ export class ConstructLibraryCdktf extends ConstructLibrary {
         return "^3.0.0";
       }
 
-      return "^10.0.12";
+      return "^10.3.0";
     }
 
     const ver = options.cdktfVersion;

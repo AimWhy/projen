@@ -178,11 +178,28 @@ test("upgrade task ignores pinned versions", () => {
     cdk8sVersionPinning: true,
     cdk8sCliVersionPinning: true,
     cdk8sPlusVersionPinning: true,
-    releaseWorkflow: true,
+    release: true,
     constructsVersion: "3.3.75",
   });
   const tasks = synthSnapshot(project)[TaskRuntime.MANIFEST_FILE].tasks;
-  expect(tasks.upgrade.steps[1].exec).toStrictEqual(
-    "npm-check-updates --dep dev --upgrade --target=minor --reject='cdk8s-cli,cdk8s-plus-22,cdk8s,constructs'"
-  );
+  // notice cdk8s and constructs isn't here
+  expect(tasks.upgrade.steps).toMatchInlineSnapshot(`
+    [
+      {
+        "exec": "npx npm-check-updates@16 --upgrade --target=minor --peer --no-deprecated --dep=dev,peer,prod,optional --filter=@types/jest,@types/node,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,typescript",
+      },
+      {
+        "exec": "yarn install --check-files",
+      },
+      {
+        "exec": "yarn upgrade @stylistic/eslint-plugin @types/jest @types/node @typescript-eslint/eslint-plugin @typescript-eslint/parser cdk8s-cli commit-and-tag-version constructs eslint-import-resolver-typescript eslint-plugin-import eslint jest jest-junit projen ts-jest typescript cdk8s-plus-22 cdk8s",
+      },
+      {
+        "exec": "npx projen",
+      },
+      {
+        "spawn": "post-upgrade",
+      },
+    ]
+  `);
 });

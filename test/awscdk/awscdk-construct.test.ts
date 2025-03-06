@@ -175,7 +175,7 @@ describe("lambda functions", () => {
         assetsDir: "resources",
       },
       lambdaOptions: {
-        runtime: awscdk.LambdaRuntime.NODEJS_10_X,
+        runtime: awscdk.LambdaRuntime.NODEJS_18_X,
         bundlingOptions: {
           externals: ["foo", "bar"],
           sourcemap: true,
@@ -190,7 +190,7 @@ describe("lambda functions", () => {
       snapshot[".projen/tasks.json"].tasks["bundle:my.lambda"].steps
     ).toStrictEqual([
       {
-        exec: 'esbuild --bundle src/my.lambda.ts --target="node10" --platform="node" --outfile="resources/my.lambda/index.js" --external:foo --external:bar --sourcemap',
+        exec: 'esbuild --bundle src/my.lambda.ts --target="node18" --platform="node" --outfile="resources/my.lambda/index.js" --tsconfig="tsconfig.dev.json" --external:foo --external:bar --sourcemap',
       },
     ]);
   });
@@ -216,23 +216,79 @@ describe("lambda functions", () => {
   });
 });
 
-describe("workflow container image", () => {
-  it("uses jsii/superchain:1-buster-slim for cdk v1", () => {
-    const project = new TestProject({ cdkVersion: "1.100.0" });
-    const snapshot = synthSnapshot(project);
-    const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
-    expect(buildWorkflow.jobs.build.container.image).toStrictEqual(
-      "jsii/superchain:1-buster-slim"
-    );
-  });
-
-  it("uses jsii/superchain:1-buster-slim-node14 for cdk v2", () => {
+describe("node version in workflow", () => {
+  it("does setup default version", () => {
     const project = new TestProject({ cdkVersion: "2.12.0" });
     const snapshot = synthSnapshot(project);
     const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
-    expect(buildWorkflow.jobs.build.container.image).toStrictEqual(
-      "jsii/superchain:1-buster-slim-node14"
+    expect(buildWorkflow.jobs.build).toMatchSnapshot();
+    expect(buildWorkflow.jobs.build.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          uses: expect.stringContaining("actions/setup-node"),
+          with: {
+            "node-version": "lts/*",
+          },
+        }),
+      ])
     );
+  });
+
+  it("does use minNodeVersion", () => {
+    const project = new TestProject({
+      cdkVersion: "2.12.0",
+      minNodeVersion: "18.0.0",
+    });
+    const snapshot = synthSnapshot(project);
+    const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
+    expect(buildWorkflow.jobs.build).toMatchSnapshot();
+    expect(buildWorkflow.jobs.build.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          uses: expect.stringContaining("actions/setup-node"),
+          with: {
+            "node-version": "18.0.0",
+          },
+        }),
+      ])
+    );
+  });
+
+  it("does setup a custom version", () => {
+    const project = new TestProject({
+      cdkVersion: "2.12.0",
+      minNodeVersion: "16.0.0",
+      workflowNodeVersion: "20.17.0",
+    });
+    const snapshot = synthSnapshot(project);
+    const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
+    expect(buildWorkflow.jobs.build).toMatchSnapshot();
+    expect(buildWorkflow.jobs.build.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          uses: expect.stringContaining("actions/setup-node"),
+          with: {
+            "node-version": "20.17.0",
+          },
+        }),
+      ])
+    );
+  });
+});
+
+describe("workflow container image", () => {
+  it("does not use an image by default for cdk v1", () => {
+    const project = new TestProject({ cdkVersion: "1.100.0" });
+    const snapshot = synthSnapshot(project);
+    const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
+    expect(buildWorkflow.jobs.build).not.toHaveProperty("container");
+  });
+
+  it("does not use an image by default for cdk v2", () => {
+    const project = new TestProject({ cdkVersion: "2.12.0" });
+    const snapshot = synthSnapshot(project);
+    const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
+    expect(buildWorkflow.jobs.build).not.toHaveProperty("container");
   });
 
   it("uses the user-defined image if specified", () => {
@@ -244,6 +300,36 @@ describe("workflow container image", () => {
     const buildWorkflow = YAML.parse(snapshot[".github/workflows/build.yml"]);
     expect(buildWorkflow.jobs.build.container.image).toStrictEqual(
       "my-custom-image"
+    );
+  });
+});
+
+describe("integ-runner", () => {
+  test('adds "integ-runner" to devDependencies', () => {
+    const project = new TestProject({
+      cdkVersion: "2.12.0",
+      experimentalIntegRunner: true,
+    });
+
+    const snapshot = synthSnapshot(project);
+
+    expect(
+      snapshot["package.json"]?.devDependencies["@aws-cdk/integ-runner"]
+    ).toStrictEqual("latest");
+    expect(
+      snapshot["package.json"]?.devDependencies["@aws-cdk/integ-tests-alpha"]
+    ).toStrictEqual("latest");
+    expect(project.tasks.tryFind("integ")?.steps).toEqual([
+      { exec: "integ-runner $@ --language typescript", receiveArgs: true },
+    ]);
+    expect(project.tasks.tryFind("integ:update")?.steps).toEqual([
+      {
+        exec: "integ-runner $@ --language typescript --update-on-failed",
+        receiveArgs: true,
+      },
+    ]);
+    expect(project.testTask.steps).toEqual(
+      expect.arrayContaining([{ spawn: "integ" }])
     );
   });
 });

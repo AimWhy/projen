@@ -1,12 +1,10 @@
 import * as path from "path";
 import { snake } from "case";
-import { Component } from "../component";
-import { Project } from "../project";
-import { YamlFile } from "../yaml";
 import {
   Artifacts,
   Cache,
   Default,
+  IDToken,
   Image,
   Include,
   Job,
@@ -15,6 +13,9 @@ import {
   VariableConfig,
   Workflow,
 } from "./configuration-model";
+import { Component } from "../component";
+import { Project } from "../project";
+import { YamlFile } from "../yaml";
 
 /**
  * Options for `CiConfiguration`.
@@ -47,6 +48,10 @@ export interface CiConfigurationOptions {
    * An initial set of jobs to add to the configuration.
    */
   readonly jobs?: Record<string, Job>;
+  /**
+   * The path of the file to generate.
+   */
+  readonly path?: string;
 }
 
 /**
@@ -55,10 +60,6 @@ export interface CiConfigurationOptions {
  * @see https://docs.gitlab.com/ee/ci/yaml/
  */
 export class CiConfiguration extends Component {
-  /**
-   * The project the configuration belongs to.
-   */
-  public readonly project: Project;
   /**
    * The name of the configuration.
    */
@@ -84,9 +85,13 @@ export class CiConfiguration extends Component {
    */
   public readonly defaultBeforeScript: string[] = [];
   /**
-   * A default list of files and directories to cache between jobs. You can only use paths that are in the local working copy.
+   * A default list of cache definitions (máx. 4) with the files and directories to cache between jobs. You can only use paths that are in the local working copy.
    */
-  public readonly defaultCache?: Cache;
+  private _defaultCache?: Cache[];
+
+  public get defaultCache(): Cache[] | undefined {
+    return this._defaultCache;
+  }
   /**
    * Specifies the default docker image to use globally for all jobs.
    */
@@ -111,6 +116,10 @@ export class CiConfiguration extends Component {
    * A default timeout job written in natural language (Ex. one hour, 3600 seconds, 60 minutes).
    */
   readonly defaultTimeout?: string;
+  /**
+   * Default ID tokens (JSON Web Tokens) that are used for CI/CD authentication to use globally for all jobs.
+   */
+  readonly defaultIdTokens?: Record<string, IDToken>;
   /**
    * Can be `Include` or `Include[]`. Each `Include` will be a string, or an
    * object with properties for the method if including external YAML file. The external
@@ -148,12 +157,12 @@ export class CiConfiguration extends Component {
     options?: CiConfigurationOptions
   ) {
     super(project);
-    this.project = project;
     this.name = path.parse(name).name;
-    this.path =
+    const derivedPath =
       this.name === "gitlab-ci"
         ? ".gitlab-ci.yml"
         : `.gitlab/ci-templates/${name.toLocaleLowerCase()}.yml`;
+    this.path = options?.path ?? derivedPath;
     this.file = new YamlFile(this.project, this.path, {
       obj: () => this.renderCI(),
       // GitLab needs to read the file from the repository in order to work.
@@ -165,7 +174,8 @@ export class CiConfiguration extends Component {
       this.defaultArtifacts = defaults.artifacts;
       defaults.beforeScript &&
         this.defaultBeforeScript.push(...defaults.beforeScript);
-      this.defaultCache = defaults.cache;
+      defaults.cache && this.addDefaultCaches(defaults.cache);
+      this.defaultIdTokens = defaults.idTokens;
       this.defaultImage = defaults.image;
       this.defaultInterruptible = defaults.interruptible;
       this.defaultRetry = defaults.retry;
@@ -179,7 +189,7 @@ export class CiConfiguration extends Component {
       this.addStages(...options.stages);
     }
     if (options?.variables) {
-      this.addJobs(options.variables);
+      this.addGlobalVariables(options.variables);
     }
     if (options?.jobs) {
       this.addJobs(options.jobs);
@@ -313,7 +323,32 @@ export class CiConfiguration extends Component {
       if (value.stage) {
         this.addStages(value.stage);
       }
+      if (value.cache) {
+        this.assertIsValidCacheSetup(value.cache);
+      }
     }
+  }
+
+  private isValidCacheSetup(caches: Cache[]): Boolean {
+    const MAX_CONFIGURABLE_CACHES = 4;
+    return caches.length <= MAX_CONFIGURABLE_CACHES;
+  }
+
+  private assertIsValidCacheSetup(caches: Cache[]) {
+    if (!this.isValidCacheSetup(caches)) {
+      throw new Error(
+        `${this.name}: GitLab CI can only define up to 4 caches, got: ${caches.length}`
+      );
+    }
+  }
+
+  /**
+   * Adds up to 4 default caches configuration to the CI configuration.
+   * @param caches Caches to add.
+   */
+  public addDefaultCaches(caches: Cache[]) {
+    this.assertIsValidCacheSetup(caches);
+    this._defaultCache = caches;
   }
 
   private renderCI() {
@@ -330,7 +365,10 @@ export class CiConfiguration extends Component {
         Object.entries(this.variables).length > 0 ? this.variables : undefined,
       workflow: snakeCaseKeys(this.workflow),
       stages: this.stages.length > 0 ? this.stages : undefined,
-      ...snakeCaseKeys(this.jobs),
+      // we do not want to change job names
+      // as they can be hidden (https://docs.gitlab.com/ee/ci/jobs/index.html#hide-jobs)
+      // or referenced in extends
+      ...snakeCaseKeys(this.jobs, true),
     };
   }
 
@@ -346,6 +384,7 @@ export class CiConfiguration extends Component {
           ? this.defaultBeforeScript
           : undefined,
       cache: this.defaultCache,
+      idTokens: this.defaultIdTokens,
       image: this.defaultImage,
       interruptible: this.defaultInterruptible,
       retry: this.defaultRetry,
@@ -360,21 +399,26 @@ export class CiConfiguration extends Component {
   }
 }
 
-function snakeCaseKeys<T = unknown>(obj: T): T {
+function snakeCaseKeys<T = unknown>(obj: T, skipTopLevel: boolean = false): T {
   if (typeof obj !== "object" || obj == null) {
     return obj;
   }
 
   if (Array.isArray(obj)) {
-    return obj.map(snakeCaseKeys) as any;
+    return obj.map((o) => snakeCaseKeys(o)) as any;
   }
 
   const result: Record<string, unknown> = {};
   for (let [k, v] of Object.entries(obj)) {
-    if (typeof v === "object" && v != null && k !== "variables") {
+    if (
+      typeof v === "object" &&
+      v != null &&
+      k !== "variables" &&
+      k !== "idTokens"
+    ) {
       v = snakeCaseKeys(v);
     }
-    result[snake(k)] = v;
+    result[skipTopLevel ? k : snake(k)] = v;
   }
   return result as any;
 }

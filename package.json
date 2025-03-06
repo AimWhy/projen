@@ -9,38 +9,39 @@
     "projen": "bin/projen"
   },
   "scripts": {
-    "build": "/bin/bash ./projen.bash build",
-    "bump": "/bin/bash ./projen.bash bump",
-    "bundle:task-runner": "/bin/bash ./projen.bash bundle:task-runner",
-    "clobber": "/bin/bash ./projen.bash clobber",
-    "compat": "/bin/bash ./projen.bash compat",
-    "compile": "/bin/bash ./projen.bash compile",
-    "contributors:update": "/bin/bash ./projen.bash contributors:update",
-    "default": "/bin/bash ./projen.bash default",
-    "devenv:setup": "/bin/bash ./projen.bash devenv:setup",
-    "docgen": "/bin/bash ./projen.bash docgen",
-    "eject": "/bin/bash ./projen.bash eject",
-    "eslint": "/bin/bash ./projen.bash eslint",
-    "integ": "/bin/bash ./projen.bash integ",
-    "integ:python-compat": "/bin/bash ./projen.bash integ:python-compat",
-    "package": "/bin/bash ./projen.bash package",
-    "package-all": "/bin/bash ./projen.bash package-all",
-    "package:go": "/bin/bash ./projen.bash package:go",
-    "package:java": "/bin/bash ./projen.bash package:java",
-    "package:js": "/bin/bash ./projen.bash package:js",
-    "package:python": "/bin/bash ./projen.bash package:python",
-    "post-compile": "/bin/bash ./projen.bash post-compile",
-    "post-upgrade": "/bin/bash ./projen.bash post-upgrade",
-    "pre-compile": "/bin/bash ./projen.bash pre-compile",
-    "readme-macros": "/bin/bash ./projen.bash readme-macros",
-    "release": "/bin/bash ./projen.bash release",
-    "test": "/bin/bash ./projen.bash test",
-    "test:update": "/bin/bash ./projen.bash test:update",
-    "test:watch": "/bin/bash ./projen.bash test:watch",
-    "unbump": "/bin/bash ./projen.bash unbump",
-    "upgrade": "/bin/bash ./projen.bash upgrade",
-    "watch": "/bin/bash ./projen.bash watch",
-    "projen": "/bin/bash ./projen.bash"
+    "build": "node ./projen.js build",
+    "bump": "node ./projen.js bump",
+    "bundle:task-runner": "node ./projen.js bundle:task-runner",
+    "check-licenses": "node ./projen.js check-licenses",
+    "clobber": "node ./projen.js clobber",
+    "compat": "node ./projen.js compat",
+    "compile": "node ./projen.js compile",
+    "contributors:update": "node ./projen.js contributors:update",
+    "default": "node ./projen.js default",
+    "devenv:setup": "node ./projen.js devenv:setup",
+    "docgen": "node ./projen.js docgen",
+    "eject": "node ./projen.js eject",
+    "eslint": "node ./projen.js eslint",
+    "integ": "node ./projen.js integ",
+    "integ:python-compat": "node ./projen.js integ:python-compat",
+    "package": "node ./projen.js package",
+    "package-all": "node ./projen.js package-all",
+    "package:go": "node ./projen.js package:go",
+    "package:java": "node ./projen.js package:java",
+    "package:js": "node ./projen.js package:js",
+    "package:python": "node ./projen.js package:python",
+    "post-compile": "node ./projen.js post-compile",
+    "post-upgrade": "node ./projen.js post-upgrade",
+    "pre-compile": "node ./projen.js pre-compile",
+    "readme-macros": "node ./projen.js readme-macros",
+    "release": "node ./projen.js release",
+    "test": "node ./projen.js test",
+    "test:watch": "node ./projen.js test:watch",
+    "unbump": "node ./projen.js unbump",
+    "upgrade": "node ./projen.js upgrade",
+    "upgrade-bundled": "node ./projen.js upgrade-bundled",
+    "watch": "node ./projen.js watch",
+    "projen": "node ./projen.js"
   },
   "author": {
     "name": "Amazon Web Services",
@@ -48,70 +49,70 @@
     "organization": true
   },
   "devDependencies": {
-    "@types/conventional-changelog-config-spec": "^2.1.1",
-    "@types/fs-extra": "^8",
+    "@types/conventional-changelog-config-spec": "^2.1.5",
     "@types/glob": "^7.2.0",
-    "@types/ini": "^1.3.31",
+    "@types/ini": "^1.3.34",
     "@types/jest": "^27",
-    "@types/node": "^14",
-    "@types/semver": "^7.3.12",
-    "@types/yargs": "^15.0.14",
-    "@typescript-eslint/eslint-plugin": "^5",
-    "@typescript-eslint/parser": "^5",
-    "all-contributors-cli": "^6.20.0",
-    "esbuild": "^0.15.6",
-    "eslint": "^8",
-    "eslint-config-prettier": "^8.5.0",
-    "eslint-import-resolver-node": "^0.3.6",
+    "@types/node": "^16",
+    "@types/semver": "^7.5.8",
+    "@types/yargs": "^16.0.9",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "all-contributors-cli": "^6.26.1",
+    "commit-and-tag-version": "^12",
+    "esbuild": "^0.25.0",
+    "eslint": "^9",
+    "eslint-config-prettier": "^8.10.0",
     "eslint-import-resolver-typescript": "^2.7.1",
-    "eslint-plugin-import": "^2.26.0",
+    "eslint-plugin-import": "^2.31.0",
     "eslint-plugin-prettier": "^4.2.1",
-    "jest": "^27",
-    "jest-junit": "^13",
-    "jsii": "^1.66.0",
-    "jsii-diff": "^1.66.0",
-    "jsii-docgen": "^1.8.110",
-    "jsii-pacmak": "^1.66.0",
-    "json-schema": "^0.4.0",
-    "json5": "^2.2.1",
+    "jest": "^29",
+    "jest-junit": "^16",
+    "jsii": "5.7.x",
+    "jsii-diff": "^1.108.0",
+    "jsii-docgen": "^10.5.0",
+    "jsii-pacmak": "^1.108.0",
+    "jsii-rosetta": "5.7.x",
+    "license-checker": "^25.0.1",
     "markmac": "^0.1.146",
-    "npm-check-updates": "^15",
-    "prettier": "^2.7.1",
-    "standard-version": "^9",
-    "ts-jest": "^27",
-    "typescript": "^3.9.10"
+    "prettier": "^2.8.8",
+    "ts-jest": "^29",
+    "ts-node": "^10.9.2",
+    "typescript": "5.7.x"
+  },
+  "peerDependencies": {
+    "constructs": "^10.0.0"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
     "case": "^1.6.3",
     "chalk": "^4.1.2",
+    "comment-json": "4.2.2",
+    "constructs": "^10.0.0",
     "conventional-changelog-config-spec": "^2.1.0",
     "fast-json-patch": "^3.1.1",
-    "fs-extra": "^9.1.0",
-    "glob": "^7",
+    "glob": "^8",
     "ini": "^2.0.0",
-    "semver": "^7.3.7",
+    "semver": "^7.7.1",
     "shx": "^0.3.4",
-    "xmlbuilder2": "^2.4.1",
-    "yaml": "2.0.0",
-    "yargs": "^16.2.0",
-    "zlib": "^1.0.5"
+    "xmlbuilder2": "^3.1.1",
+    "yaml": "^2.2.2",
+    "yargs": "^17.7.2"
   },
   "bundledDependencies": [
     "@iarna/toml",
     "case",
     "chalk",
+    "comment-json",
     "conventional-changelog-config-spec",
     "fast-json-patch",
-    "fs-extra",
     "glob",
     "ini",
     "semver",
     "shx",
     "xmlbuilder2",
     "yaml",
-    "yargs",
-    "zlib"
+    "yargs"
   ],
   "keywords": [
     "cdk",
@@ -122,25 +123,32 @@
     "scaffolding"
   ],
   "engines": {
-    "node": ">= 14.0.0"
+    "node": ">= 16.0.0"
   },
   "main": "lib/index.js",
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "version": "0.0.0",
   "jest": {
-    "maxWorkers": "50%",
-    "testMatch": [
-      "<rootDir>/src/**/__tests__/**/*.ts?(x)",
-      "<rootDir>/(test|src)/**/*(*.)@(spec|test).ts?(x)"
-    ],
-    "clearMocks": true,
-    "collectCoverage": true,
+    "coverageProvider": "v8",
     "coverageReporters": [
       "json",
       "lcov",
       "clover",
-      "cobertura"
+      "cobertura",
+      "text-summary"
     ],
+    "maxWorkers": "50%",
+    "testMatch": [
+      "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
+      "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)",
+      "<rootDir>/@(projenrc)/**/*(*.)@(spec|test).ts?(x)",
+      "<rootDir>/@(projenrc)/**/__tests__/**/*.ts?(x)"
+    ],
+    "clearMocks": true,
+    "collectCoverage": true,
     "coverageDirectory": "coverage",
     "coveragePathIgnorePatterns": [
       "/node_modules/"
@@ -160,11 +168,13 @@
         }
       ]
     ],
-    "preset": "ts-jest",
-    "globals": {
-      "ts-jest": {
-        "tsconfig": "tsconfig.dev.json"
-      }
+    "transform": {
+      "^.+\\.[t]sx?$": [
+        "ts-jest",
+        {
+          "tsconfig": "tsconfig.dev.json"
+        }
+      ]
     }
   },
   "types": "lib/index.d.ts",
@@ -192,8 +202,5 @@
       "rootDir": "src"
     }
   },
-  "resolutions": {
-    "@types/prettier": "2.6.0"
-  },
-  "//": "~~ Generated by projen. To modify, edit .projenrc.js and run \"npx projen\"."
+  "//": "~~ Generated by projen. To modify, edit .projenrc.ts and run \"node ./projen.js\"."
 }

@@ -15,6 +15,18 @@ export interface AwsCdkDepsCommonOptions {
   readonly cdkVersion: string;
 
   /**
+   * Version range of the AWS CDK CLI to depend on.
+   *
+   * Can be either a specific version, or an NPM version range.
+   *
+   * By default, the latest 2.x version will be installed; you can use this
+   * option to restrict it to a specific version or version range.
+   *
+   * @default "^2"
+   */
+  readonly cdkCliVersion?: string;
+
+  /**
    * Minimum version of the `constructs` library to depend on.
    *
    * @default - for CDK 1.x the default is "3.2.27", for CDK 2.x the default is
@@ -127,6 +139,13 @@ export abstract class AwsCdkDeps extends Component {
   public readonly cdkVersion: string;
 
   /**
+   * The dependency requirement for the CDK CLI (e.g. '^2.3.4').
+   *
+   * Will return `^2` if the version was unspecified by the user.
+   */
+  public readonly cdkCliVersion: string;
+
+  /**
    * The minimum version of the AWS CDK (e.g. `2.0.0`).
    */
   public readonly cdkMinimumVersion: string;
@@ -156,6 +175,7 @@ export abstract class AwsCdkDeps extends Component {
 
     const framework = determineFrameworkVersion(options);
 
+    this.cdkCliVersion = options.cdkCliVersion ?? "^2";
     this.cdkVersion = framework.range;
     this.cdkMajorVersion = framework.major;
     this.cdkMinimumVersion = framework.minimum;
@@ -268,6 +288,10 @@ export abstract class AwsCdkDeps extends Component {
         break;
     }
 
+    // First remove the version added by projen
+    this.project.deps.removeDependency("constructs", DependencyType.BUILD);
+
+    // Add the version for CDK
     this.project.deps.addDependency(
       `${this._packageNames.constructs}@${versionRequirement}`,
       this.dependencyType
@@ -399,6 +423,7 @@ const AWS_CDK_V1_V2_SCOPED_PACKAGES = [
   "@aws-cdk/cloud-assembly-schema",
   "@aws-cdk/assert",
   "@aws-cdk/cloudformation-diff",
+  "@aws-cdk/integ-runner",
 ];
 
 function determineFrameworkVersion(options: AwsCdkDepsOptions) {

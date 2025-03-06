@@ -32,29 +32,32 @@
         "CHANGELOG": "dist/changelog.md",
         "BUMPFILE": "dist/version.txt",
         "RELEASETAG": "dist/releasetag.txt",
-        "RELEASE_TAG_PREFIX": ""
+        "RELEASE_TAG_PREFIX": "",
+        "BUMP_PACKAGE": "commit-and-tag-version@^12",
+        "RELEASABLE_COMMITS": "git log --no-merges --oneline $LATEST_TAG..HEAD -E --grep \"^(feat|fix){1}(\\([^()[:space:]]+\\))?(!)?:[[:blank:]]+.+\""
       },
       "steps": [
         {
           "builtin": "release/bump-version"
         }
       ],
-      "condition": "! git log --oneline -1 | grep -q \"chore(release):\""
+      "condition": "git log --oneline -1 | grep -qv \"chore(release):\""
     },
     "bundle:task-runner": {
       "name": "bundle:task-runner",
-      "description": "Bundle the run-task script needed for \"projen eject\"",
+      "description": "Bundle the run-task.cjs script needed for \"projen eject\"",
       "steps": [
         {
-          "exec": "esbuild src/task-runtime.ts --outfile=lib/run-task.js --bundle --platform=node --external:\"*/package.json\""
-        },
+          "exec": "esbuild src/task-runtime.ts --outfile=lib/run-task.cjs --bundle --platform=node --format=cjs --external:\"*/package.json\" --banner:js=\"#!/usr/bin/env node\" --footer:js=\"const runtime = new TaskRuntime(\\\".\\\");\nruntime.runTask(process.argv[2]);\""
+        }
+      ]
+    },
+    "check-licenses": {
+      "name": "check-licenses",
+      "steps": [
         {
-          "exec": "echo \"#!/usr/bin/env node\" | cat - lib/run-task.js | tee lib/run-task.js > /dev/null",
-          "name": "Insert Node shebang to beginning of the file"
-        },
-        {
-          "exec": "echo \"const runtime = new TaskRuntime(\\\".\\\");\nruntime.runTask(process.argv[2]);\" >> lib/run-task.js",
-          "name": "Add driver code to end of the file"
+          "exec": "license-checker --summary --production --onlyAllow \"MIT;ISC;BSD;BSD-2-Clause;BSD-3-Clause;Apache-2.0\"",
+          "receiveArgs": true
         }
       ]
     },
@@ -112,7 +115,7 @@
       "name": "contributors:update",
       "steps": [
         {
-          "exec": "all-contributors check | grep \"Missing contributors\" -A 1 | tail -n1 | sed -e \"s/,//g\" | xargs -n1 | grep -v \"[bot]\" | xargs -n1 -I{} all-contributors add {} code"
+          "exec": "all-contributors check | grep \"Missing contributors\" -A 1 | tail -n1 | sed -e \"s/,//g\" | xargs -n1 | grep -v \"\\[bot\\]\" | grep -v \"cdklabs-automation\" | xargs -n1 -I{} all-contributors add {} code"
         }
       ]
     },
@@ -121,7 +124,7 @@
       "description": "Synthesize project files",
       "steps": [
         {
-          "exec": "node .projenrc.js"
+          "exec": "ts-node --project tsconfig.dev.json .projenrc.ts"
         }
       ]
     },
@@ -141,7 +144,7 @@
       "description": "Generate API.md from .jsii manifest",
       "steps": [
         {
-          "exec": "jsii-docgen -o docs/api/API.md"
+          "exec": "jsii-docgen .jsii -o docs/api/projen --split-by-submodule"
         }
       ]
     },
@@ -160,9 +163,31 @@
     "eslint": {
       "name": "eslint",
       "description": "Runs eslint against the codebase",
+      "env": {
+        "ESLINT_USE_FLAT_CONFIG": "false"
+      },
       "steps": [
         {
-          "exec": "eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern src test build-tools .projenrc.js"
+          "exec": "eslint --ext .ts,.tsx --fix --no-error-on-unmatched-pattern $@ src test build-tools projenrc .projenrc.ts",
+          "receiveArgs": true
+        }
+      ]
+    },
+    "install": {
+      "name": "install",
+      "description": "Install project dependencies and update lockfile (non-frozen)",
+      "steps": [
+        {
+          "exec": "yarn install --check-files"
+        }
+      ]
+    },
+    "install:ci": {
+      "name": "install:ci",
+      "description": "Install project dependencies using frozen lockfile",
+      "steps": [
+        {
+          "exec": "yarn install --check-files --frozen-lockfile"
         }
       ]
     },
@@ -195,7 +220,12 @@
       "description": "Creates the distribution package",
       "steps": [
         {
-          "exec": "if [ ! -z ${CI} ]; then rsync -a . .repo --exclude .git --exclude node_modules && rm -rf dist && mv .repo dist; else /bin/bash ./projen.bash package-all; fi"
+          "spawn": "package:js",
+          "condition": "node -e \"if (!process.env.CI) process.exit(1)\""
+        },
+        {
+          "spawn": "package-all",
+          "condition": "node -e \"if (process.env.CI) process.exit(1)\""
         }
       ]
     },
@@ -277,7 +307,12 @@
     },
     "pre-compile": {
       "name": "pre-compile",
-      "description": "Prepare the project for compilation"
+      "description": "Prepare the project for compilation",
+      "steps": [
+        {
+          "spawn": "check-licenses"
+        }
+      ]
     },
     "readme-macros": {
       "name": "readme-macros",
@@ -322,19 +357,11 @@
       "description": "Run tests",
       "steps": [
         {
-          "exec": "jest --passWithNoTests --all --updateSnapshot --coverageProvider=v8"
+          "exec": "jest --passWithNoTests --updateSnapshot",
+          "receiveArgs": true
         },
         {
           "spawn": "eslint"
-        }
-      ]
-    },
-    "test:update": {
-      "name": "test:update",
-      "description": "Update jest snapshots",
-      "steps": [
-        {
-          "exec": "jest --updateSnapshot"
         }
       ]
     },
@@ -355,7 +382,9 @@
         "CHANGELOG": "dist/changelog.md",
         "BUMPFILE": "dist/version.txt",
         "RELEASETAG": "dist/releasetag.txt",
-        "RELEASE_TAG_PREFIX": ""
+        "RELEASE_TAG_PREFIX": "",
+        "BUMP_PACKAGE": "commit-and-tag-version@^12",
+        "RELEASABLE_COMMITS": "git log --no-merges --oneline $LATEST_TAG..HEAD -E --grep \"^(feat|fix){1}(\\([^()[:space:]]+\\))?(!)?:[[:blank:]]+.+\""
       },
       "steps": [
         {
@@ -371,31 +400,40 @@
       },
       "steps": [
         {
-          "exec": "yarn upgrade npm-check-updates"
-        },
-        {
-          "exec": "npm-check-updates --dep dev --upgrade --target=minor --reject='yaml,markmac'"
-        },
-        {
-          "exec": "npm-check-updates --dep optional --upgrade --target=minor --reject='yaml,markmac'"
-        },
-        {
-          "exec": "npm-check-updates --dep peer --upgrade --target=minor --reject='yaml,markmac'"
-        },
-        {
-          "exec": "npm-check-updates --dep prod --upgrade --target=minor --reject='yaml,markmac'"
-        },
-        {
-          "exec": "npm-check-updates --dep bundle --upgrade --target=minor --reject='yaml,markmac'"
+          "exec": "npx npm-check-updates@16 --upgrade --target=minor --peer --no-deprecated --dep=dev,peer,prod,optional --filter=@types/conventional-changelog-config-spec,@types/glob,@types/ini,@types/jest,@types/semver,@types/yargs,all-contributors-cli,esbuild,eslint-config-prettier,eslint-import-resolver-typescript,eslint-plugin-import,eslint-plugin-prettier,jest,jsii-diff,jsii-pacmak,license-checker,prettier,ts-jest,ts-node"
         },
         {
           "exec": "yarn install --check-files"
         },
         {
-          "exec": "yarn upgrade @types/conventional-changelog-config-spec @types/fs-extra @types/glob @types/ini @types/jest @types/node @types/semver @types/yargs @typescript-eslint/eslint-plugin @typescript-eslint/parser all-contributors-cli esbuild eslint-config-prettier eslint-import-resolver-node eslint-import-resolver-typescript eslint-plugin-import eslint-plugin-prettier eslint jest-junit jest jsii jsii-diff jsii-docgen jsii-pacmak json-schema json5 npm-check-updates prettier standard-version ts-jest typescript @iarna/toml case chalk conventional-changelog-config-spec fast-json-patch fs-extra glob ini semver shx xmlbuilder2 yaml yargs zlib"
+          "exec": "yarn upgrade @types/conventional-changelog-config-spec @types/glob @types/ini @types/jest @types/node @types/semver @types/yargs @typescript-eslint/eslint-plugin @typescript-eslint/parser all-contributors-cli commit-and-tag-version esbuild eslint-config-prettier eslint-import-resolver-typescript eslint-plugin-import eslint-plugin-prettier eslint jest jest-junit jsii-diff jsii-docgen jsii-pacmak jsii-rosetta jsii license-checker prettier ts-jest ts-node typescript"
         },
         {
-          "exec": "/bin/bash ./projen.bash"
+          "exec": "node ./projen.js"
+        },
+        {
+          "spawn": "post-upgrade"
+        }
+      ]
+    },
+    "upgrade-bundled": {
+      "name": "upgrade-bundled",
+      "description": "upgrade bundled dependencies",
+      "env": {
+        "CI": "0"
+      },
+      "steps": [
+        {
+          "exec": "npx npm-check-updates@16 --upgrade --target=minor --peer --no-deprecated --dep= --filter=@iarna/toml,case,chalk,conventional-changelog-config-spec,fast-json-patch,ini,semver,shx,xmlbuilder2,yargs"
+        },
+        {
+          "exec": "yarn install --check-files"
+        },
+        {
+          "exec": "yarn upgrade @iarna/toml case chalk comment-json conventional-changelog-config-spec fast-json-patch glob ini semver shx xmlbuilder2 yaml yargs"
+        },
+        {
+          "exec": "node ./projen.js"
         },
         {
           "spawn": "post-upgrade"
@@ -413,7 +451,7 @@
     }
   },
   "env": {
-    "PATH": "$(npx -c \"node -e \\\"console.log(process.env.PATH)\\\"\")"
+    "PATH": "$(npx -c \"node --print process.env.PATH\")"
   },
-  "//": "~~ Generated by projen. To modify, edit .projenrc.js and run \"npx projen\"."
+  "//": "~~ Generated by projen. To modify, edit .projenrc.ts and run \"node ./projen.js\"."
 }

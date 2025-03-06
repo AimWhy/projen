@@ -1,5 +1,5 @@
+import { promises as fs } from "fs";
 import { join } from "path";
-import { readFile, writeFile } from "fs-extra";
 import * as logging from "../logging";
 import * as utils from "../util";
 
@@ -57,20 +57,20 @@ export async function updateChangelog(
     );
   }
 
-  const inputChangelogContent = await readFile(inputChangelog, "utf-8");
-  const changelogVersionSearchPattern = `${version}`;
+  const inputChangelogContent = await fs.readFile(inputChangelog, "utf-8");
 
-  if (!inputChangelogContent.includes(changelogVersionSearchPattern)) {
+  if (!inputChangelogContent.includes(version)) {
     throw new Error(
       `Supplied version ${version} was not found in input changelog. You may want to check it's content.`
     );
   }
 
-  const outputChangelogContent = await readFile(outputChangelog, {
+  const outputChangelogContent = await fs.readFile(outputChangelog, {
     encoding: "utf-8",
     flag: "a+",
   });
 
+  const changelogVersionSearchPattern = `[${version}]`;
   if (outputChangelogContent.indexOf(changelogVersionSearchPattern) > -1) {
     logging.info(
       `Changelog already contains an entry for ${version}. Skipping changelog update.`
@@ -83,7 +83,7 @@ export async function updateChangelog(
     "\n\n" +
     outputChangelogContent.trimStart();
 
-  await writeFile(outputChangelog, newChangelog);
+  await fs.writeFile(outputChangelog, newChangelog);
 
   utils.exec(
     `git add ${outputChangelog} && git commit -m "chore(release): ${version}"`,

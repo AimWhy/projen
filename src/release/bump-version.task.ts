@@ -1,8 +1,8 @@
 /**
- * Resolves the latest version from git tags and uses `standard-version` to bump
+ * Resolves the latest version from git tags and uses `commit-and-tag-version` to bump
  * to the next version based on commits.
  *
- * This expects `standard-version` to be installed in the path.
+ * This expects `commit-and-tag-version` to be installed in the path.
  *
  * Environment variables:
  *
@@ -14,10 +14,11 @@
  * - MIN_MAJOR: minimum major version number to use
  * - CHANGELOG: name of changelog file to create
  * - RELEASE_TAG_PREFIX: (optional) a prefix to apply to the release tag
- *
+ * - BUMP_PACKAGE: (optional) the bump package to use
+ * - NEXT_VERSION_COMMAND: (optional) a command to decide the version to release
  */
-import * as logging from "../logging";
 import { bump, BumpOptions } from "./bump-version";
+import * as logging from "../logging";
 
 const versionFile = process.env.OUTFILE;
 const prerelease = process.env.PRERELEASE;
@@ -28,6 +29,9 @@ const bumpFile = process.env.BUMPFILE;
 const releaseTagFile = process.env.RELEASETAG;
 const prefix = process.env.RELEASE_TAG_PREFIX;
 const versionrcOptions = process.env.VERSIONRCOPTIONS;
+const releasableCommits = process.env.RELEASABLE_COMMITS;
+const bumpPackage = process.env.BUMP_PACKAGE;
+const nextVersionCommand = process.env.NEXT_VERSION_COMMAND;
 
 if (!versionFile) {
   throw new Error("OUTFILE is required");
@@ -68,6 +72,9 @@ const opts: BumpOptions = {
   tagPrefix: prefix,
   // doesn't work with long customization
   versionrcOptions: JSON.parse(versionrcOptions ?? "{}"),
+  releasableCommits,
+  bumpPackage,
+  nextVersionCommand: nextVersionCommand ? nextVersionCommand : undefined,
 };
 logging.debug(opts);
 

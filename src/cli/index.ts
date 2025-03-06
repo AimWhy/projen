@@ -1,19 +1,25 @@
 import { resolve } from "path";
 import * as yargs from "yargs";
-import { PROJEN_RC, PROJEN_VERSION } from "../common";
-import * as logging from "../logging";
-import { TaskRuntime } from "../task-runtime";
-import { getNodeMajorVersion } from "../util";
+import newCommand from "./cmds/new";
 import { synth } from "./synth";
 import { discoverTaskCommands } from "./tasks";
+import {
+  PROJEN_DIR,
+  DEFAULT_PROJEN_RC_JS_FILENAME,
+  PROJEN_VERSION,
+} from "../common";
+import * as logging from "../logging";
+import { TaskRuntime } from "../task-runtime";
+import { findUp, getNodeMajorVersion } from "../util";
 
-const DEFAULT_RC = resolve(PROJEN_RC);
+const DEFAULT_RC = resolve(DEFAULT_PROJEN_RC_JS_FILENAME);
 
 async function main() {
   const ya = yargs;
-  ya.commandDir("cmds");
+  ya.command(newCommand);
 
-  const runtime = new TaskRuntime(".");
+  const pathToProjenDir = findUp(PROJEN_DIR, process.cwd());
+  const runtime = new TaskRuntime(pathToProjenDir ?? ".");
   discoverTaskCommands(runtime, ya);
 
   ya.recommendCommands();
@@ -33,6 +39,7 @@ async function main() {
   });
   ya.options("debug", { type: "boolean", default: false, desc: "Debug logs" });
   ya.options("rc", {
+    deprecated: true,
     desc: "path to .projenrc.js file",
     default: DEFAULT_RC,
     type: "string",
@@ -49,16 +56,16 @@ async function main() {
     global: false,
   });
 
-  const args = ya.argv;
+  const args = await ya.argv;
 
   if (args.debug) {
     process.env.DEBUG = "true";
   }
 
   const nodeVersion = getNodeMajorVersion();
-  if (nodeVersion && nodeVersion < 14) {
+  if (nodeVersion && nodeVersion < 16) {
     logging.warn(
-      `WARNING: You are using Node v${nodeVersion}, which reaches end of life on April 30, 2022. Support for EOL Node releases may be dropped by projen in the future. Please consider upgrading to Node >= 14 as soon as possible.`
+      `WARNING: You are using Node v${nodeVersion}, which reaches end of life on April 30, 2023. Support for EOL Node releases may be dropped by projen in the future. Please consider upgrading to Node >= 16 as soon as possible.`
     );
   }
 
